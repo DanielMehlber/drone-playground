@@ -601,18 +601,35 @@ def _save_column(fig: plt.Figure, name: str) -> None:
     plt.close(fig)
 
 
-def _legend_below(axis: plt.Axes, handles: list[plt.Line2D] | None = None, ncol: int = 1) -> None:
-    kwargs: dict[str, object] = {
-        "fontsize": 6.5,
-        "loc": "upper center",
-        "bbox_to_anchor": (0.5, -0.32),
-        "frameon": False,
-        "ncol": ncol,
-    }
+def _legend_columns(labels: list[str]) -> int:
+    count = len(labels)
+    if count <= 1:
+        return 1
+    longest = max(len(label) for label in labels)
+    if longest >= 22 or count <= 4:
+        return 2
+    return 3
+
+
+def _legend_below(fig: plt.Figure, axis: plt.Axes, handles: list[plt.Line2D] | None = None) -> None:
     if handles is None:
-        axis.legend(**kwargs)
+        handles, labels = axis.get_legend_handles_labels()
     else:
-        axis.legend(handles=handles, **kwargs)
+        labels = [str(handle.get_label()) for handle in handles]
+    existing = axis.get_legend()
+    if existing is not None:
+        existing.remove()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.0),
+        ncol=_legend_columns(labels),
+        fontsize=6.5,
+        frameon=False,
+        borderaxespad=0.3,
+    )
+    fig.tight_layout()
 
 
 def plot_scenarios(references: dict[str, tuple[np.ndarray, np.ndarray]]) -> None:
@@ -631,6 +648,8 @@ def plot_scenarios(references: dict[str, tuple[np.ndarray, np.ndarray]]) -> None
     axes.set_ylabel("North, y (m)", labelpad=8)
     axes.set_zlabel("Up, z (m)", labelpad=6)
     axes.tick_params(labelsize=6.5, pad=1)
+    spans = [max(hi - lo, 1e-6) for lo, hi in (axes.get_xlim(), axes.get_ylim(), axes.get_zlim())]
+    axes.set_box_aspect(tuple(spans))
     handles, labels = axes.get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.48, 0.99), ncol=2, fontsize=6.5, frameon=False)
     # The z label sits just outside a full-width 3D axes, so the axes is inset.
@@ -656,7 +675,13 @@ def plot_scenarios(references: dict[str, tuple[np.ndarray, np.ndarray]]) -> None
     axes[1].set_ylabel("Pair difference (N)")
     axes[2].set_ylabel("Tilt (deg)")
     axes[2].set_xlabel("Time from release (s)")
-    axes[0].legend(fontsize=6.5, loc="lower center", bbox_to_anchor=(0.5, 1.05), ncol=2, frameon=False)
+    thrust_max = max(float(np.max(line.get_ydata())) for line in axes[0].get_lines())
+    axes[0].set_ylim(0.0, thrust_max * 1.08)
+    pair_span = max(float(np.max(np.abs(line.get_ydata()))) for line in axes[1].get_lines())
+    axes[1].set_ylim(-pair_span * 1.15, pair_span * 1.15)
+    tilt_max = max(float(np.max(line.get_ydata())) for line in axes[2].get_lines())
+    axes[2].set_ylim(0.0, max(tilt_max * 1.1, 1.0))
+    axes[0].legend(fontsize=6.5, loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=2, frameon=False)
     _save_column(fig, "scenarios_thrust_tilt.png")
 
 
@@ -680,7 +705,13 @@ def plot_errors(rows: list[dict[str, object]]) -> None:
                 axis.plot(dts, vals, style, color=colors[kind], marker="o", ms=4.5, lw=1.5)
         axis.set_xlabel("Step or hold, Δt (ms)")
         axis.set_ylabel(ylabel)
+        axis.set_xscale("log")
         axis.set_yscale("log")
+        measured_ms = [0.5, 1.0, 2.0, 5.0, 10.0]
+        axis.set_xticks(measured_ms)
+        axis.set_xticklabels(["0.5", "1", "2", "5", "10"])
+        axis.set_xlim(0.4, 13.0)
+        axis.minorticks_off()
         scenario_handles = [
             plt.Line2D([0], [0], color=colors[kind], lw=1.6, label=SCENARIO_LABELS[kind]) for kind in shown
         ]
@@ -688,7 +719,7 @@ def plot_errors(rows: list[dict[str, object]]) -> None:
             plt.Line2D([0], [0], color="black", ls=style, marker="o", ms=4.5, label=label)
             for _method, style, label in styles
         ]
-        _legend_below(axis, scenario_handles + method_handles)
+        _legend_below(fig, axis, scenario_handles + method_handles)
         _save_column(fig, filename)
 
 
@@ -746,9 +777,14 @@ def plot_speed(records: list[dict[str, object]]) -> None:
                 lw=1.5,
                 label=PRETTY[name],
             )
+        batches = [1, 8, 32, 128, 512, 2048]
+        axis.set_xscale("log")
+        axis.set_xticks(batches)
+        axis.set_xticklabels([str(batch) for batch in batches])
+        axis.minorticks_off()
         axis.set_xlabel("Vehicles in the batch")
         axis.set_ylabel("Time per vehicle\nper step (µs)")
-        _legend_below(axis)
+        _legend_below(fig, axis)
         _save_column(fig, filename)
 
 
