@@ -1,0 +1,12 @@
+TeX Gyre Termes and TeX Gyre Cursor, shipped so the IEEE template can find
+the faces it names. Licensed under the GUST Font License (LPPL), see
+GUST-FONT-LICENSE.txt.
+
+texgyretermes-regular.otf
+texgyretermes-bold.otf
+texgyretermes-italic.otf
+texgyretermes-bolditalic.otf
+texgyrecursor-regular.otf
+texgyrecursor-bold.otf
+texgyrecursor-italic.otf
+texgyrecursor-bolditalic.otf

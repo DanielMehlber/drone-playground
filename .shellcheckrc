@@ -1,0 +1,2 @@
+# /opt/ros/jazzy/setup.bash exists only inside the container.
+disable=SC1091

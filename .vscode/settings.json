@@ -1,0 +1,27 @@
+{
+  "cmake.sourceDirectory": "C:/Users/danie/Documents/Repos/drone-playground/interfaces/drone_msgs",
+  "python.defaultInterpreterPath": "/opt/venv/bin/python",
+  "python.analysis.diagnosticMode": "workspace",
+  "jupyter.kernels.excludePythonEnvironments": [],
+  "jupyter.jupyterServerType": "local",
+  "notebook.formatOnSave.enabled": true,
+  "notebook.defaultFormatter": "charliermarsh.ruff",
+  "notebook.codeActionsOnSave": {
+    "notebook.source.fixAll": "explicit",
+    "notebook.source.organizeImports": "explicit"
+  },
+  "mypy-type-checker.cwd": "${workspaceFolder}/control",
+  "mypy-type-checker.importStrategy": "fromEnvironment",
+  "ruff.cwd": "${workspaceFolder}/control",
+  "ruff.importStrategy": "fromEnvironment",
+  "ruff.lint.enable": true,
+  "ruff.format.enable": true,
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "explicit",
+      "source.organizeImports": "explicit"
+    }
+  }
+}

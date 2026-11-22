@@ -1,0 +1,41 @@
+# Tool versions come from control/requirements/dev.txt, so the hooks run the
+# same ruff and mypy as the editor and `make check`.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: ruff format
+        entry: bash -c 'cd control && ruff format'
+        language: system
+        types_or: [python, jupyter]
+        pass_filenames: false
+      - id: ruff-check
+        name: ruff check
+        entry: bash -c 'cd control && ruff check --fix'
+        language: system
+        types_or: [python, jupyter]
+        pass_filenames: false
+      - id: mypy
+        name: mypy
+        entry: bash -c 'cd control && mypy'
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        language: system
+        types: [shell]

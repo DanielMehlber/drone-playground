@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drone-control"
+version = "0.1.0"
+description = "Inner-loop flight controller for the Gazebo X3 quadrotor"
+readme = "docs/Control.md"
+requires-python = ">=3.12"
+# rclpy and the ROS message packages come from apt (ros-jazzy-*), not PyPI.
+# Leave numpy to apt too: the ROS message C extensions are built against it.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "jupyter>=1.1",
+  "matplotlib>=3.9",
+  "mypy>=1.13",
+  "pip-tools>=7.4",
+  "pre-commit>=4.0",
+  "ruff>=0.8",
+  "sympy>=1.13",
+  "torch>=2.5",
+]
+
+[project.scripts]
+drone-control = "drone_control.node:main"
+
+[tool.setuptools.package-data]
+drone_control = ["py.typed"]
+
+[tool.pip-tools]
+strip-extras = true
+quiet = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "notebooks"]
+extend-include = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = [
+  "B",   # bugbear
+  "C4",  # comprehensions
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "I",   # isort
+  "N",   # pep8-naming
+  "RUF", # ruff-specific
+  "SIM", # simplify
+  "UP",  # pyupgrade
+  "W",   # pycodestyle warnings
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["drone_control"]
+
+[tool.ruff.lint.per-file-ignores]
+# Matrix notation (R, I_inv, Ad) and late-bound timing closures in the microbenchmark.
+"notebooks/dynamics_benchmark.py" = ["B023", "N802", "N803", "N806"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+mypy_path = "src"
+explicit_package_bases = true
+warn_unreachable = true
+# rclpy is only partly annotated in Jazzy (Node.get_logger, Parameter, ...).
+# mypy reports inherited Node methods under the subclass name.
+untyped_calls_exclude = ["rclpy", "drone_control.node.ControllerNode"]
+
+[[tool.mypy.overrides]]
+# ROS message packages ship no type information.
+module = ["actuator_msgs.*", "geometry_msgs.*", "sensor_msgs.*", "std_msgs.*"]
+ignore_missing_imports = true

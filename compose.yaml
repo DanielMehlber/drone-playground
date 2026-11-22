@@ -1,0 +1,53 @@
+# Deployment. Starts the whole system from the runtime image:
+#
+#   docker compose up --build
+#   docker compose --profile tools up --build   # also Foxglove on ws://localhost:8765
+#
+# Development happens in the single dev container (.devcontainer), where each
+# component is started by hand. Nothing here is mounted from the host.
+name: drone-playground
+
+x-runtime: &runtime
+  image: drone-playground:runtime
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+    target: runtime
+  restart: unless-stopped
+  # Fast DDS finds the other containers by multicast on the dds network.
+  environment:
+    ROS_DOMAIN_ID: "83"
+    RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+
+services:
+  sim:
+    <<: *runtime
+    command: ["sim/run-sim.sh"]
+    networks: [dds]
+    ports:
+      - "6080:6080" # Gazebo in the browser, when the command is ["sim/run-sim.sh", "--view"]
+
+  # Shares the simulator's network namespace so Gazebo transport discovery
+  # stays on one host, the same as in the dev container.
+  bridge:
+    <<: *runtime
+    command: ["sim/run-bridge.sh"]
+    network_mode: service:sim
+    depends_on: [sim]
+
+  control:
+    <<: *runtime
+    command: ["drone-control"]
+    networks: [dds]
+    depends_on: [bridge]
+
+  foxglove:
+    <<: *runtime
+    command: ["control/run-foxglove.sh"]
+    profiles: [tools]
+    networks: [dds]
+    ports:
+      - "8765:8765"
+
+networks:
+  dds:

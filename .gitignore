@@ -1,0 +1,52 @@
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/cache/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Compiled objects, packages, and model binaries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.whl
+*.bin
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.onnx
+
+# Fonts used to render the PDF locally. The PDF is committed.
+*.otf
+*.ttf
+*.woff
+*.woff2
+
+# Generated plots and notebook benchmark dumps
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+control/notebooks/dynamics_benchmark_results.txt
+
+# Quarto cache and build products. Keep rendered PDFs.
+**/.quarto/
+**/_output/**
+!**/_output/**/
+!**/*.pdf

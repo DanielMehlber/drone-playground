@@ -1,0 +1,194 @@
+---
+title: "Comparing Error Propagation and Computational Load of Different Flight Dynamics Model Steps for Quadrotors"
+date: 2026-11-22
+crossref:
+  fig-title: "Fig."
+  fig-prefix: "Fig."
+  tbl-title: "Table"
+  tbl-prefix: "Table"
+abstract: |
+  A 13-state discrete quadrotor map is timed on CPU as a nonlinear block step and as an affine deviation map, with analytic and automatic Jacobians kept as a separate cost. Open-loop trajectories are scored against a nonlinear step of 0.1 ms. On this machine the bare linear map is faster at every batch from 1 to 2048. Rebuilding the analytic Jacobian on every item is faster than the nonlinear step only at batch 1; from batch 8 the vectorized nonlinear step wins. Holding that Jacobian for 0.5–10 ms and integrating the affine model at 0.1 ms stays orders of magnitude closer to the fine trajectory than one Euler step of the same length. On an NVIDIA GeForce RTX 4070 SUPER the resident linear map is the fastest apply at batch 2048. The resident nonlinear step stays slower than the CPU Torch step at every batch from 1 to 2048.
+---
+
+## The question
+
+The discrete plant is a map $x^{+} = f(x, u)$ on position, body velocity, a quaternion, and body rate, with four rotor forces as the input. Two uses show up immediately in a batched simulator or an estimator: apply $f$, or apply a local linear model of $f$. This note asks which of those operators is faster at a given batch size, and how large a step can be before the open-loop trajectory leaves a fine nonlinear reference.
+
+The comparison is numerical. The block equations and the decision to keep $I^{-1}$ diagonal, to replace $R^{-1}$ by $R^{\mathsf{T}}$, and to drop symbolic normalization are the ones already fixed in the dynamics notebook. The $13 \times 13$ Jacobian is not expanded here.
+
+## Methods
+
+### Nonlinear step
+
+One step of size $\Delta t$ is the explicit block map
+
+$$
+\begin{aligned}
+\tau &= \sum_{i=1}^{4} r_i \times F_i, \\
+\omega^{+} &= \omega + \Delta t\, I^{-1}\big(\tau - \omega \times I\omega\big), \\
+q^{+} &= q + \tfrac12 \Delta t\, q \otimes \omega, \\
+v^{+} &= v + \Delta t\left(R(q)\, g_w + \tfrac1m \sum_{i=1}^{4} F_i\right), \\
+p^{+} &= p + \Delta t\, R(q)^{\mathsf{T}} v^{+},
+\end{aligned}
+$$
+
+with $F_i = (0, 0, f_i)$ in the body frame and $g_w = (0, 0, -g)$. The same NumPy and PyTorch code paths implement this map. After each recorded step the quaternion is divided by its norm. That normalization is numerical; it is not part of the symbolic $f$.
+
+### Affine map about the current state
+
+Let $\dot x = (f(x, u) - x)/\Delta t$. The rate Jacobians $A = \partial \dot x / \partial x$ and $B = \partial \dot x / \partial u$ are the analytic derivatives of that expression, evaluated at the state and input at the beginning of an interval. The deviation update is
+
+$$
+\delta x^{+} = (I + \Delta t\, A)\, \delta x + (\Delta t\, B)\, \delta u.
+$$
+
+$I + \Delta t\, A$ and $\Delta t\, B$ are the discrete Jacobians of $f$. They match `torch.autograd.functional.jacobian` of the block step to a max-abs gap of $4.3 \times 10^{-19}$ on six states along the pitch-pulse reference. A one-step remainder at perturbations of scale $10^{-4}$ is at most $5.3 \times 10^{-8}$ in the 13-vector norm. The symbolic $f$ and the NumPy block step agree at hover to a max-abs gap of 0.
+
+For a trajectory, $\Delta t$ in the error study is not the integration step. It is how long $A$ and $B$ are frozen. Inside that interval the affine model is applied at the reference step of 0.1 ms. The zeroth-order term is $f$ at the anchor state, so the first micro-step reproduces the nonlinear step and later micro-steps are the first-order prediction. The input is constant on the interval, so $\delta u = 0$. The quaternion is renormalized once, at the end of the interval.
+
+The speed study times a different use of the same operator: $A$ and $B$ are built once per item and then the map $\delta x \leftarrow (I + \Delta t A)\delta x + (\Delta t B)\delta u$ is applied many times. A third column rebuilds the analytic Jacobian on every step and then applies the map. That column is the cost of a refreshed linearization, not a second plant.
+
+### Jacobian construction
+
+Analytic $A$ and $B$ come from SymPy `lambdify` with common-subexpression elimination, called once per item. Automatic differentiation calls `torch.autograd.functional.jacobian` on one state at a time. Both are cost columns. Neither is used as the open-loop plant.
+
+### Assumptions
+
+- $I^{-1} = \mathrm{diag}(1/I_{xx}, 1/I_{yy}, 1/I_{zz})$ is an input. The step does not invert $I$.
+- The quaternion that enters $f$ has unit length, so $R^{-1} = R^{\mathsf{T}}$.
+- Attitude uses explicit Euler with the rate at the start of the step, not $\omega^{+}$.
+- Rotor-drag yaw is omitted.
+- The linear model is first order about the state at the beginning of the hold. Its error has to grow with the hold and with the size of the maneuver.
+- A host-transfer GPU step, when a device is present, synchronizes every step. A resident step allocates state and input on the device and does not copy the state back until the batch ends.
+
+### Reference and grids
+
+The error baseline is the nonlinear NumPy step at $\Delta t_{\mathrm{ref}} = 0.1\,\mathrm{ms}$, renormalized every step, over a horizon of 2 s. Coarser nonlinear steps use the same $u(t)$ sampled on their own grid, at 0.5, 1, 2, 5, and 10 ms. Every one of those steps divides 0.4 s and 0.8 s, so the open-loop switches land on a knot and the reference can be subsampled instead of interpolated.
+
+Position error is the root-mean-square of $\|p - p_{\mathrm{ref}}\|$ over the coarse knots after $t = 0$. Attitude error is the root-mean-square of the quaternion geodesic $2\arccos(|q \cdot q_{\mathrm{ref}}|)$, reported in degrees. The same two numbers are also stored at $t = 2\,\mathrm{s}$.
+
+Speed is reported as microseconds per (step · item) and as (step · item) per second. Batch sizes are 1, 8, 32, 128, 512, and 2048. Jacobian timings use fewer inner steps at large batches; the per-item cost is still one evaluation.
+
+## Apparatus
+
+The process that produced the numbers below sees:
+
+- CPU: AMD Ryzen 7 8700F 8-Core Processor, 16 hardware threads, 15.4 GiB RAM
+- GPU: NVIDIA GeForce RTX 4070 SUPER, 12,282 MiB, driver 610.88, compute capability 8.9
+- OS: Linux 5.15.167.4-microsoft-standard-WSL2
+- `torch 2.15.0+cu132` (CUDA 13.2), NumPy 2.5.5
+- `torch.cuda.is_available()` is true and `nvidia-smi` reports the device above
+
+The CUDA wheel is the one that produced both the host Torch columns and the device columns. Resident timings allocate on the device and synchronize once after the batch. Transfer timings copy state and input to the device on every step, synchronize, and copy the state back.
+
+The airframe constants are the X3 values used by the notebook: mass 1.5 kg, $g = 9.81$, $I_{xx} = 0.0347563$, $I_{yy} = 0.07$, $I_{zz} = 0.0977$, and the four rotor positions from the same model. Hover thrust per rotor is $mg/4 = 3.679\,\mathrm{N}$.
+
+## Scenarios
+
+Each run is open loop for 2 s from rest at $(0, 0, 1)$ with identity attitude. The same schedule is used for every integrator.
+
+- **Hover.** Each rotor holds $mg/4$.
+- **Pitch pulse.** For 0.4 s the front pair is 0.35 N above hover and the rear pair is 0.35 N below, then the signs swap for 0.4 s, then hover. Nose-down, then nose-up. Peak tilt 23.8°. The vehicle ends at $(5.11, 0, -0.18)$ m because the residual tilt is held under hover thrust.
+- **Roll reversal.** The same shape with a 0.12 N left/right bias, sized to the smaller roll inertia. Peak tilt 26.6°. End position $(0, 5.65, -0.47)$ m.
+- **Climb with pitch.** Collective is $1.08\,mg$ for the whole horizon, plus a 0.02 N nose-down bias. Peak tilt 17.0°. End position $(1.19, 0, 2.41)$ m.
+
+Differential thrust cancels in the total, so hover, pitch, and roll share one collective line. The middle panel of @fig-thrust is the signed front-minus-rear command, except on the roll reversal, where it is left-minus-right. Tilt is the angle between body $+z$ and world $+z$.
+
+![World position of the 0.1 ms nonlinear reference. Each point is $(p_x, p_y, p_z)$ after that step, with the quaternion renormalized. East, north, and up are the world axes. Hover remains at $(0, 0, 1)$ m.](figures/scenarios_3d.png){#fig-paths width=100%}
+
+![Open-loop commands and the tilt they produce. Collective thrust is $f_1+f_2+f_3+f_4$ on the 0.1 ms grid. Pairwise difference is front pair minus rear pair, and left pair minus right pair on the roll reversal. Tilt is the angle between body $+z$ and world up, $\arccos(\hat{z}_b \cdot \hat{z}_w)$.](figures/scenarios_thrust_tilt.png){#fig-thrust width=100%}
+
+## Speed
+
+@fig-speed-apply is the cost of applying one step. The linear-map curves apply a frozen map and do not include building $A$ and $B$. The curve labeled "Jacobian + map" rebuilds the analytic Jacobian on every item and then applies the map. @fig-speed-build is the cost of forming $A$ and $B$ alone.
+
+![Time per vehicle per step for applying a step. Each point is the fastest timed repeat after warmup, divided by batch size times the number of steps. Linear-map curves apply a frozen map. Jacobian + map rebuilds the analytic Jacobian every item. CUDA resident keeps state on the device. CUDA transfer copies state and input on every step.](figures/speed_apply.png){#fig-speed-apply width=100%}
+
+![Time per vehicle per step for building $A$ and $B$. Analytic is one SymPy lambdify call per item. Analytic + H2D adds the copy of $A$ and $B$ onto the device. Autograd differentiates one state at a time, on the host or on the device. The timing rule matches @fig-speed-apply.](figures/speed_build.png){#fig-speed-build width=100%}
+
+| Method | Batch 1 | Batch 2048 |
+|---|---:|---:|
+| NumPy nonlinear | 95.5 µs | 0.495 µs |
+| Torch CPU nonlinear | 217 µs | 0.388 µs |
+| CUDA nonlinear, resident | 1510 µs | 0.765 µs |
+| CUDA nonlinear, transfer | 1530 µs | 0.830 µs |
+| NumPy linear map | 3.76 µs | 0.189 µs |
+| Torch CPU linear map | 6.24 µs | 0.0474 µs |
+| CUDA linear map, resident | 64.8 µs | 0.0279 µs |
+| CUDA linear map, transfer | 210 µs | 0.153 µs |
+| Analytic Jacobian | 36.5 µs | 32.5 µs |
+| Analytic Jacobian + map | 35.6 µs | 38.4 µs |
+| Autograd Jacobian, CPU | 10800 µs | 11200 µs |
+
+: Per-item cost at the two ends of the batch grid. Batches 8, 32, 128, and 512 are in `generated/tables.md`. {#tbl-speed-ends}
+
+The bare linear map is faster than the nonlinear step at every measured batch, in NumPy, in Torch on the CPU, and in the resident CUDA map. At batch 1 the NumPy map takes 3.76 µs against 95.5 µs for the NumPy step. At batch 2048 the fastest apply is the resident CUDA linear map at 0.0279 µs, ahead of the Torch CPU linear map at 0.0474 µs. That is about fourteen times the Torch CPU nonlinear step (0.388 µs) and about $3.6 \times 10^{7}$ (step · item) per second.
+
+Torch does not win the small batches on the CPU. The Torch linear map passes the NumPy linear map at batch 512 (0.157 µs against 0.261 µs). The Torch nonlinear step passes the NumPy nonlinear step at batch 2048 (0.388 µs against 0.495 µs). The NumPy linear map is the cheapest apply through batch 128.
+
+Rebuilding the Jacobian changes the ranking. Analytic $A, B$ plus one map application costs about 40 µs per item at every batch, because the generated function is a Python call per item. That beats the nonlinear step only at batch 1 (35.6 µs against 95.5 µs). From batch 8 the vectorized nonlinear step is ahead (13.5 µs against 44.6 µs). At batch 2048 the refreshed linear step is about 78 times the NumPy nonlinear step.
+
+Automatic differentiation on the CPU stays near 11 ms per item, roughly 340 times the analytic Jacobian at batch 2048, and it does not improve with batch size. It is an oracle for the check in the methods section, not a step you put in a loop.
+
+## Trajectory error
+
+@fig-error-pos and @fig-error-att score both operators against the 0.1 ms nonlinear trajectory. Hover is missing from the log axes because both errors are identically zero at every step: the trim is an equilibrium of $f$, and the affine model about that trim with $\delta u = 0$ stays there.
+
+![Position RMSE against the 0.1 ms nonlinear trajectory, over the coarse knots after $t = 0$. The value is the root-mean-square of $\|p - p_{\mathrm{ref}}\|$. Solid: one nonlinear step of length $\Delta t$. Dashed: analytic Jacobian frozen for $\Delta t$, affine map integrated at 0.1 ms. Hover is identically zero and is left off the log axis.](figures/error_position.png){#fig-error-pos width=100%}
+
+![Attitude RMSE against the same reference. The value is the root-mean-square of the quaternion geodesic $2\arccos(|q\cdot q_{\mathrm{ref}}|)$, in degrees. Solid and dashed match @fig-error-pos. Hover is omitted.](figures/error_attitude.png){#fig-error-att width=100%}
+
+| Scenario | Step 0.5 | Hold 0.5 | Step 10 | Hold 10 |
+|---|---:|---:|---:|---:|
+| Pitch pulse | 0.671 | 0.000036 | 16.7 | 0.020 |
+| Roll reversal | 0.748 | 0.000044 | 18.6 | 0.024 |
+| Climb with pitch | 0.282 | 0.000009 | 7.03 | 0.0048 |
+
+: Position RMSE in millimeters. Column heads are the step or the hold, in milliseconds. Hover is 0 for every cell. Attitude RMSE at 10 ms is 0.108°, 0.120°, and 0.049° for the three nonlinear rows, and below $10^{-6}$ degrees for every linear hold. {#tbl-error}
+
+Both errors grow with the interval and with the maneuver. Roll is the largest, then pitch, then the climb, then hover. The growth is not the same kind of error. A 10 ms nonlinear step is one explicit Euler step, and on these schedules it leaves 1–2 cm of position RMSE and about a tenth of a degree of attitude RMSE. A 10 ms hold of $A$ and $B$, integrated at 0.1 ms, leaves a few hundredths of a millimeter. The Jacobian is not a coarser plant here. It is a fine plant whose linearization is refreshed on a slower clock. For these rates, ten milliseconds of freeze is cheap compared with one ten-millisecond Euler step.
+
+That is also why the attitude error of the held model barely moves with the interval: the quaternion kinematics stay inside the linearization of a 0.1 ms step, and the hold is short beside the tilt timescale in @fig-thrust.
+
+## GPU resident versus transfer
+
+The timing harness has four placements for the nonlinear step and the same four for the linear map:
+
+- NumPy on the host
+- Torch on the host
+- Torch CUDA, resident: state and input allocated on the device, the kernel looped, one synchronization after the batch
+- Torch CUDA, transfer: every step copies state and input to the device, runs the kernel, synchronizes, and copies the state back
+
+Jacobian construction has the same split. The analytic formula stays a host `lambdify`; its CUDA column times that call plus the copy of $A$ and $B$ onto the device. The autograd column differentiates the block step on device tensors, one item at a time.
+
+The resident nonlinear step does not beat Torch on the CPU at any batch in this grid. At batch 1 it takes 1.51 ms against 217 µs. At batch 2048 it takes 0.765 µs against 0.388 µs, still about twice the host step. The map is a short chain of small tensor operations, and the launch cost has not fallen below the vectorized CPU step by batch 2048.
+
+Resident is faster than the per-step copy at every batch. For the nonlinear step the gap is small, 0.765 µs against 0.830 µs at batch 2048, because the kernel itself dominates. For the linear map the copy is the cost: 0.0279 µs resident against 0.153 µs transfer at batch 2048. The resident linear map passes the Torch CPU map at batch 512 (0.106 µs against 0.157 µs) and is the fastest apply at batch 2048.
+
+Copying the analytic Jacobian to the device raises that cost from about 33 µs to about 110 µs, and the copy does not get cheaper as the batch grows. Autograd on the device is about 51 ms per item, roughly five times the host autograd, for the same reason: one Python call per item, now with device launches inside it.
+
+## Discussion
+
+**Nonlinear block step.** It is the plant. It needs no Jacobian, it batches across items, and on this CPU the Torch version is the faster plant at batch 2048. The resident GPU step does not pass it. Its trajectory error is ordinary Euler truncation: fine at 0.5 ms (under a millimeter here) and into the centimeter range at 10 ms. Use it when the batch is large and the step has to be $f$ itself.
+
+**Bare linear map.** It is the cheapest propagation on every batch in this grid. The NumPy map is the cheapest through batch 128, and from batch 512 the resident CUDA map is the cheapest of all. The price is that someone else must have built $A$ and $B$. That is the right operator inside an estimator or a tracker that already has the local model and is pushing a deviation, not a replacement for $f$ at an arbitrary state unless the affine offset is kept and the refresh is fast enough.
+
+**Refreshed analytic Jacobian.** Building $A$ and $B$ from the symbolic formula costs about 35 µs per item and does not speed up as the batch grows. Adding the map does not hide that. The combination beats $f$ only at batch 1. From batch 8, if the goal is the next state of many vehicles, call the nonlinear step. If the goal is the deviation model, pay the 35 µs and keep the analytic formula; do not form it with autograd in the loop.
+
+**Autograd.** It agrees with the analytic discrete Jacobian to roundoff, which is what makes it a good check. At about 11 ms per item on the CPU, and about 51 ms on the GPU, it is two orders of magnitude off the pace of the analytic formula and three or more off the pace of $f$ at large batches.
+
+**Held linearization as an integrator.** On these four open-loop schedules, refreshing the analytic model every 0.5–10 ms and integrating it at 0.1 ms tracks the fine nonlinear trajectory much more closely than one Euler step of the refresh period. The hold error still grows with the interval and with the maneuver, as the first-order assumption says it must. It just grows from a much smaller base. A hover trim contributes nothing to either error.
+
+**GPU on this 4070 SUPER.** Keep the linear map resident if the batch is at least 512 and $A$ and $B$ already exist: that is the fastest apply in the grid. Do not move the nonlinear step to the device for a win over the CPU, not through batch 2048. Do not copy state on every step, and do not build the Jacobian with autograd on the device. The host lambdify is the Jacobian to keep.
+
+## Conclusion
+
+On the Ryzen 7 8700F and an RTX 4070 SUPER, with this 13-state map, the linear apply is faster than the nonlinear step at batch 1 and is still faster at batch 2048. The fastest apply at batch 2048 is the resident CUDA linear map. The resident nonlinear step never passes the CPU Torch step in this grid. The crossover that matters for a refreshed model is the other way: from batch 8, a vectorized nonlinear step is faster than rebuilding an analytic Jacobian per item. Autograd matches that Jacobian and is about 340 times slower on the CPU, and slower still on the device. Against a 0.1 ms nonlinear reference, a single Euler step of 10 ms costs about a centimeter and a tenth of a degree on the pitch and roll pulses; freezing the Jacobian for those same 10 ms and integrating the affine model at 0.1 ms stays under a few hundredths of a millimeter.
+
+The study is `study.py` in this directory. It writes `results.json`, `generated/tables.md`, and the figures. Quarto renders this article with the Typst engine.
+
+::: {.content-visible when-format="html"}
+## Appendix
+
+{{< include generated/tables.md >}}
+:::
