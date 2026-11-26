@@ -11,12 +11,12 @@ Open this folder as an Obsidian vault. Start at [docs/Home.md](docs/Home.md).
 | `sim` | Gazebo Harmonic world and the `ros_gz_bridge` script |
 | `control` | The Python controller package, `drone_control` |
 | `docker` | One Dockerfile with `dev` and `runtime` targets |
-| `.devcontainer` | The single dev container for the whole repo |
+| `.devcontainer` | Dev container for the whole repo: CUDA on Windows, Apple MPS on a Mac |
 
 ## Develop
 
 1. Install Docker Desktop and the Dev Containers extension.
-2. Open the repo root and choose **Reopen in Container**. The first build is large: ROS 2 Jazzy and Gazebo Harmonic.
+2. Open the repo root and choose **Reopen in Container**. Pick **Drone playground (CUDA)** on Windows with an NVIDIA GPU, or **Drone playground (Apple MPS)** on a Mac with Apple silicon. The first build is large: ROS 2 Jazzy and Gazebo Harmonic. The Mac choice also builds a PyTorch server on the host the first time. That needs the Xcode command line tools and network.
 3. Start each component in its own terminal:
 
    ```bash
@@ -28,7 +28,7 @@ Open this folder as an Obsidian vault. Start at [docs/Home.md](docs/Home.md).
 
 4. Before committing, from `control/`: `make check`.
 
-The container mounts the WSLg X11 socket from `\\wsl$\Ubuntu` for `--gui`. Without an Ubuntu WSL distribution, remove that entry from `.devcontainer/devcontainer.json` and use `--view`.
+The CUDA container mounts the WSLg X11 socket from `\\wsl$\Ubuntu` for `--gui`. Without that Ubuntu distribution, use `--view`. On a Mac, use `--view` (localhost:6080). Metal does not enter the Linux VM, so the MPS container runs a tensor on `"mps"` by sending the PyTorch operation to a server on the Mac.
 
 ## Tooling
 

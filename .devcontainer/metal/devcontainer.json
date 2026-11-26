@@ -1,0 +1,72 @@
+{
+  "name": "Drone playground (Apple MPS)",
+  "build": {
+    "context": "../..",
+    "dockerfile": "../../docker/Dockerfile",
+    "target": "dev",
+    "args": {
+      "TORCH_INDEX": "https://download.pytorch.org/whl/cpu"
+    }
+  },
+  "initializeCommand": "bash .devcontainer/metal/ensure-host.sh",
+  "workspaceFolder": "/workspaces/drone-playground",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/drone-playground,type=bind",
+  "mounts": [
+    "source=${localEnv:HOME}/.cache/drone-playground/varco,target=/opt/varco,type=bind,readonly"
+  ],
+  "containerEnv": {
+    "ROS_DOMAIN_ID": "83",
+    "RMW_IMPLEMENTATION": "rmw_fastrtps_cpp",
+    "HOST_GPU": "mps",
+    "BRIDGE_HOST": "host.docker.internal",
+    "BRIDGE_PORT": "47700"
+  },
+  "forwardPorts": [6080, 8765, 8888],
+  "portsAttributes": {
+    "6080": { "label": "Gazebo (noVNC)" },
+    "8765": { "label": "Foxglove bridge" },
+    "8888": { "label": "JupyterLab" }
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "postStartCommand": "bash .devcontainer/metal/check-bridge.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "charliermarsh.ruff",
+        "ms-python.debugpy",
+        "ms-python.mypy-type-checker",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter",
+        "ms-iot.vscode-ros",
+        "timonwong.shellcheck"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/opt/venv/bin/python",
+        "python.analysis.diagnosticMode": "workspace",
+        "jupyter.kernels.excludePythonEnvironments": [],
+        "jupyter.jupyterServerType": "local",
+        "notebook.formatOnSave.enabled": true,
+        "notebook.defaultFormatter": "charliermarsh.ruff",
+        "notebook.codeActionsOnSave": {
+          "notebook.source.fixAll": "explicit",
+          "notebook.source.organizeImports": "explicit"
+        },
+        "mypy-type-checker.cwd": "${workspaceFolder}/control",
+        "mypy-type-checker.importStrategy": "fromEnvironment",
+        "ruff.cwd": "${workspaceFolder}/control",
+        "ruff.importStrategy": "fromEnvironment",
+        "ruff.lint.enable": true,
+        "ruff.format.enable": true,
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.formatOnSave": true,
+          "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit",
+            "source.organizeImports": "explicit"
+          }
+        }
+      }
+    }
+  }
+}

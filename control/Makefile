@@ -3,7 +3,7 @@
 help:
 	@echo "lock       regenerate requirements/*.txt from pyproject.toml"
 	@echo "upgrade    lock with the newest versions allowed"
-	@echo "sync       make the venv match requirements/dev.txt"
+	@echo "sync       make the venv match requirements/dev.txt, then reinstall torch"
 	@echo "format     ruff format and autofix"
 	@echo "lint       ruff check and format check"
 	@echo "typecheck  mypy --strict"
@@ -22,6 +22,7 @@ upgrade:
 sync:
 	pip-sync requirements/dev.txt
 	pip install --no-deps --editable .
+	bash ../.devcontainer/install-torch.sh
 
 format:
 	ruff format .

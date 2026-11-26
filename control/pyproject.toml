@@ -21,7 +21,11 @@ dev = [
   "pre-commit>=4.0",
   "ruff>=0.8",
   "sympy>=1.13",
-  "torch>=2.5",
+  # PyTorch is installed by the dev image, not locked here. The CUDA wheel
+  # pulls NVIDIA packages that do not install on linux/arm64, and the macOS
+  # wheel does not install in this Linux image. torch==2.15.0 comes from
+  # PyPI on the CUDA dev container (cu128 once a GPU is visible) and from
+  # the CPU index plus the MPS bridge on the Apple MPS dev container.
 ]
 
 [project.scripts]

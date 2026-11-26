@@ -6,7 +6,13 @@ The error baseline is the nonlinear NumPy step at 0.1 ms. A coarser nonlinear
 step uses that same map with a larger ``dt``. The linear trajectory freezes
 the analytic Jacobian at the state at the start of each coarse interval and
 applies the affine map at the 0.1 ms reference step until the interval ends.
-GPU placements are timed only when ``torch.cuda.is_available()`` is true.
+GPU placements are timed only when a device is present. CUDA uses float64 and
+times a resident allocation against a per-step host-device copy. Apple MPS has
+no float64; that grid is float32. The shared placement keeps state in the MPS
+allocation, which on this SoC is the machine's memory, and synchronizes once
+after the batch. The copy placement is the CUDA transfer protocol on MPS.
+A run on a machine with only one of the two devices keeps the other device's
+records in ``results.json``.
 """
 
 from __future__ import annotations
@@ -42,8 +48,8 @@ def _prefer_matching_mpl_toolkits() -> None:
 _prefer_matching_mpl_toolkits()
 
 import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np
-import torch
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 NOTEBOOKS = HERE.parents[1] / "notebooks"
@@ -290,6 +296,13 @@ def _time_call(fn: Callable[[], None], *, warmup: int, repeats: int = 1) -> floa
 def _sync_if_cuda(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+
+
+def _sync_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
 
 
 def jacobian_work(batch: int) -> tuple[int, int]:
@@ -754,7 +767,39 @@ PRETTY = {
     "torch_cpu_jacobian_autograd": "Autograd Jacobian",
     "cuda_jacobian_analytic": "Analytic Jacobian + H2D",
     "cuda_jacobian_autograd": "Autograd Jacobian, CUDA",
+    "torch_cpu_f32_nonlinear": "Torch CPU float32 nonlinear",
+    "torch_cpu_f32_linear_map": "Torch CPU float32 linear map",
+    "torch_cpu_f32_jacobian_autograd": "Autograd Jacobian, CPU float32",
+    "mps_shared_nonlinear": "MPS shared nonlinear",
+    "mps_copy_nonlinear": "MPS copy nonlinear",
+    "mps_shared_linear_map": "MPS shared linear map",
+    "mps_copy_linear_map": "MPS copy linear map",
+    "mps_jacobian_analytic": "Analytic Jacobian + MPS place",
+    "mps_jacobian_autograd": "Autograd Jacobian, MPS",
 }
+
+
+MPS_PROPAGATION_NAMES = (
+    "torch_cpu_f32_nonlinear",
+    "mps_shared_nonlinear",
+    "mps_copy_nonlinear",
+    "torch_cpu_f32_linear_map",
+    "mps_shared_linear_map",
+    "mps_copy_linear_map",
+)
+MPS_JACOBIAN_NAMES = (
+    "torch_cpu_f32_jacobian_autograd",
+    "mps_jacobian_analytic",
+    "mps_jacobian_autograd",
+)
+COMPARE_NAMES = (
+    "cuda_resident_nonlinear",
+    "cuda_transfer_nonlinear",
+    "mps_shared_nonlinear",
+    "cuda_resident_linear_map",
+    "cuda_transfer_linear_map",
+    "mps_shared_linear_map",
+)
 
 
 def plot_speed(records: list[dict[str, object]]) -> None:
@@ -850,7 +895,27 @@ def fmt(value: float, digits: int = 3) -> str:
     return f"{value:.{digits}g}"
 
 
-def write_tables(errors: list[dict[str, object]], records: list[dict[str, object]], checks: dict[str, float]) -> str:
+def _append_speed_table(lines: list[str], records: list[dict[str, object]]) -> None:
+    lines.append("| Method | Batch | µs / (step·item) | (step·item) / s |")
+    lines.append("|---|---:|---:|---:|")
+    for row in records:
+        lines.append(
+            "| {name} | {batch} | {us} | {rate} |".format(
+                name=PRETTY[str(row["name"])],
+                batch=int(row["batch_size"]),
+                us=fmt(float(row["us_per_step_item"])),
+                rate=fmt(float(row["items_per_s"]), 4),
+            )
+        )
+
+
+def write_tables(
+    errors: list[dict[str, object]],
+    records: list[dict[str, object]],
+    checks: dict[str, float],
+    mps_records: list[dict[str, object]] | None = None,
+    mps_checks: dict[str, float] | None = None,
+) -> str:
     lines = ["### Trajectory error", ""]
     lines.append(
         "| Scenario | Hold / step | Method | Position RMSE | Position at 2 s | Attitude RMSE | Attitude at 2 s |"
@@ -868,18 +933,19 @@ def write_tables(errors: list[dict[str, object]], records: list[dict[str, object
                 att_end=fmt(float(row["att_horizon_deg"])),
             )
         )
-    lines.extend(["", "### Speed", ""])
-    lines.append("| Method | Batch | µs / (step·item) | (step·item) / s |")
-    lines.append("|---|---:|---:|---:|")
-    for row in records:
-        lines.append(
-            "| {name} | {batch} | {us} | {rate} |".format(
-                name=PRETTY[str(row["name"])],
-                batch=int(row["batch_size"]),
-                us=fmt(float(row["us_per_step_item"])),
-                rate=fmt(float(row["items_per_s"]), 4),
-            )
+    lines.extend(["", "### Speed, Ryzen 7 8700F and RTX 4070 SUPER (float64)", ""])
+    _append_speed_table(lines, records)
+    if mps_records:
+        lines.extend(["", "### Speed, Apple M5 Pro (float32)", ""])
+        lines.extend(
+            [
+                "The host columns are Torch on this machine's CPU in float32, the dtype of the MPS columns.",
+                "Shared keeps the working set in the MPS allocation and synchronizes once after the batch.",
+                "Copy sends state to the device and brings it back on every step.",
+                "",
+            ]
         )
+        _append_speed_table(lines, mps_records)
     lines.extend(
         [
             "",
@@ -890,6 +956,26 @@ def write_tables(errors: list[dict[str, object]], records: list[dict[str, object
             "",
         ]
     )
+    if mps_checks:
+        lines.extend(
+            [
+                "### Float32 step on the Apple M5 Pro",
+                "",
+                (
+                    "- Nonlinear step, Torch float32 CPU vs NumPy float64, max abs: "
+                    f"{mps_checks['cpu_f32_vs_f64_inf']:.3e}"
+                ),
+                (
+                    "- Nonlinear step, MPS float32 vs Torch float32 CPU, max abs: "
+                    f"{mps_checks['mps_vs_cpu_f32_inf']:.3e}"
+                ),
+                (
+                    "- Analytic discrete Jacobian (float64, cast to float32) vs autograd on MPS, "
+                    f"max abs: {mps_checks['analytic_vs_autograd_f32_inf']:.3e}"
+                ),
+                "",
+            ]
+        )
     text = "\n".join(lines)
     (GENERATED / "tables.md").write_text(text + "\n")
     return text
@@ -916,7 +1002,425 @@ def style_plots() -> None:
     )
 
 
+def mps_available() -> bool:
+    return bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+
+
+def mps_hardware_record() -> dict[str, object]:
+    """This process's machine. The GPU name is the SoC the bridge runs on."""
+    name = str(torch.backends.mps.get_name())
+    return {
+        "platform": platform.platform(),
+        "cpu_model": f"{name} (SoC; the Linux VM reports {cpu_model()}, {platform.os.cpu_count()} threads)",
+        "cpu_count": platform.os.cpu_count(),
+        "memory_gib": memory_gib(),
+        "torch": torch.__version__,
+        "numpy": np.__version__,
+        "gpu": {
+            "mps_available": True,
+            "device_name": name,
+            "gpu_core_count": int(torch.backends.mps.get_core_count()),
+            "recommended_max_memory_bytes": int(torch.mps.recommended_max_memory()),
+            "dtype": "float32",
+            "unified_memory": True,
+            "bridge": (
+                "Linux VM MPS bridge. A tensor on 'mps' is allocated on the Mac and the step runs there. "
+                "Staying on that allocation is the shared placement. Copying back to the CPU each step "
+                "crosses the bridge."
+            ),
+        },
+    }
+
+
+def _batch_state(batch: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    hover = hover_thrust()
+    state_np = np.zeros((batch, 13), dtype=np.float64)
+    state_np[:, 6] = 1.0
+    state_np[:, 0:3] = rng.normal(0.0, 0.05, size=(batch, 3))
+    state_np[:, 3:6] = rng.normal(0.0, 0.05, size=(batch, 3))
+    state_np[:, 7:10] = rng.normal(0.0, 0.01, size=(batch, 3))
+    quat = state_np[:, 6:10]
+    state_np[:, 6:10] = quat / np.linalg.norm(quat, axis=1, keepdims=True)
+    state_np[:, 10:13] = rng.normal(0.0, 0.05, size=(batch, 3))
+    control_np = hover + rng.normal(0.0, 0.02, size=(batch, 4))
+    return state_np, control_np
+
+
+def speed_records_mps(
+    rate_jacobians: Callable[[np.ndarray, np.ndarray, float], tuple[np.ndarray, np.ndarray]],
+) -> list[dict[str, object]]:
+    """Same batch grid as the CUDA study, in float32, on the shared allocation and on a per-step copy.
+
+    The host columns are the same Torch step on this CPU in float32. MPS cannot time the float64
+    grid the CUDA study used. Apply columns are the fastest of five repeats. Jacobian columns
+    are one repeat, matching the CUDA study, because each of those samples already loops over
+    the batch.
+    """
+    rng = np.random.default_rng(0)
+    dt = float(X3["dt"])
+    device = torch.device("mps")
+    dtype = torch.float32
+    records: list[dict[str, object]] = []
+
+    def add(name: str, batch: int, steps: int, seconds: float, placement: str) -> None:
+        work = batch * steps
+        records.append(
+            {
+                "name": name,
+                "batch_size": batch,
+                "steps": steps,
+                "seconds": seconds,
+                "us_per_step_item": 1e6 * seconds / work,
+                "items_per_s": work / seconds,
+                "placement": placement,
+                "dtype": "float32",
+            }
+        )
+
+    for batch in BATCH_SIZES:
+        state_np, control_np = _batch_state(batch, rng)
+        steps = propagation_steps(batch)
+        jac_steps, jac_warmup = jacobian_work(batch)
+
+        discrete_a = np.empty((batch, 13, 13), dtype=np.float64)
+        discrete_b = np.empty((batch, 13, 4), dtype=np.float64)
+        for index in range(batch):
+            state_jacobian, input_jacobian = rate_jacobians(state_np[index], control_np[index], dt)
+            discrete_a[index], discrete_b[index] = jac_analytic_to_discrete(state_jacobian, input_jacobian, dt)
+
+        host_state = torch.tensor(state_np, dtype=dtype)
+        host_control = torch.tensor(control_np, dtype=dtype)
+        host_a = torch.tensor(discrete_a, dtype=dtype)
+        host_b = torch.tensor(discrete_b, dtype=dtype)
+        host_dev = torch.zeros_like(host_state)
+        host_du = torch.zeros_like(host_control)
+
+        def run_cpu_nonlinear(
+            host_state: torch.Tensor = host_state,
+            host_control: torch.Tensor = host_control,
+            steps: int = steps,
+        ) -> None:
+            state = host_state
+            for _ in range(steps):
+                state = step_nonlinear_torch(state, host_control)
+
+        def run_cpu_linear(
+            host_dev: torch.Tensor = host_dev,
+            host_du: torch.Tensor = host_du,
+            host_a: torch.Tensor = host_a,
+            host_b: torch.Tensor = host_b,
+            steps: int = steps,
+        ) -> None:
+            state = host_dev
+            for _ in range(steps):
+                state = torch.bmm(host_a, state.unsqueeze(-1)).squeeze(-1) + torch.bmm(
+                    host_b, host_du.unsqueeze(-1)
+                ).squeeze(-1)
+
+        def run_cpu_autograd(
+            host_state: torch.Tensor = host_state,
+            host_control: torch.Tensor = host_control,
+            steps: int = jac_steps,
+            batch: int = batch,
+        ) -> None:
+            for _ in range(steps):
+                for index in range(batch):
+                    jac_autograd_torch(host_state[index], host_control[index])
+
+        add("torch_cpu_f32_nonlinear", batch, steps, _time_call(run_cpu_nonlinear, warmup=2, repeats=5), "cpu_f32")
+        add("torch_cpu_f32_linear_map", batch, steps, _time_call(run_cpu_linear, warmup=2, repeats=5), "cpu_f32")
+        add(
+            "torch_cpu_f32_jacobian_autograd",
+            batch,
+            jac_steps,
+            _time_call(run_cpu_autograd, warmup=jac_warmup),
+            "cpu_f32",
+        )
+
+        state_t = host_state.to(device)
+        control_t = host_control.to(device)
+        map_a = host_a.to(device)
+        map_b = host_b.to(device)
+        deviation_t = torch.zeros_like(state_t)
+        delta_u_t = torch.zeros_like(control_t)
+        _sync_device(device)
+
+        def run_shared_nonlinear(
+            state_t: torch.Tensor = state_t,
+            control_t: torch.Tensor = control_t,
+            device: torch.device = device,
+            steps: int = steps,
+        ) -> None:
+            state = state_t
+            for _ in range(steps):
+                state = step_nonlinear_torch(state, control_t)
+            _sync_device(device)
+
+        def run_shared_linear(
+            deviation_t: torch.Tensor = deviation_t,
+            delta_u_t: torch.Tensor = delta_u_t,
+            map_a: torch.Tensor = map_a,
+            map_b: torch.Tensor = map_b,
+            device: torch.device = device,
+            steps: int = steps,
+        ) -> None:
+            state = deviation_t
+            for _ in range(steps):
+                state = torch.bmm(map_a, state.unsqueeze(-1)).squeeze(-1) + torch.bmm(
+                    map_b, delta_u_t.unsqueeze(-1)
+                ).squeeze(-1)
+            _sync_device(device)
+
+        def run_shared_autograd(
+            state_t: torch.Tensor = state_t,
+            control_t: torch.Tensor = control_t,
+            device: torch.device = device,
+            steps: int = jac_steps,
+            batch: int = batch,
+        ) -> None:
+            for _ in range(steps):
+                for index in range(batch):
+                    jac_autograd_torch(state_t[index], control_t[index])
+            _sync_device(device)
+
+        add("mps_shared_nonlinear", batch, steps, _time_call(run_shared_nonlinear, warmup=2, repeats=5), "mps_shared")
+        add("mps_shared_linear_map", batch, steps, _time_call(run_shared_linear, warmup=2, repeats=5), "mps_shared")
+        add(
+            "mps_jacobian_autograd",
+            batch,
+            jac_steps,
+            _time_call(run_shared_autograd, warmup=jac_warmup),
+            "mps_shared",
+        )
+
+        def run_copy_nonlinear(
+            host_state: torch.Tensor = host_state,
+            host_control: torch.Tensor = host_control,
+            device: torch.device = device,
+            steps: int = steps,
+        ) -> None:
+            state = host_state
+            for _ in range(steps):
+                state_d = state.to(device)
+                control_d = host_control.to(device)
+                state_d = step_nonlinear_torch(state_d, control_d)
+                _sync_device(device)
+                state = state_d.to("cpu")
+
+        def run_copy_linear(
+            host_dev: torch.Tensor = host_dev,
+            host_du: torch.Tensor = host_du,
+            map_a: torch.Tensor = map_a,
+            map_b: torch.Tensor = map_b,
+            device: torch.device = device,
+            steps: int = steps,
+        ) -> None:
+            state = host_dev
+            for _ in range(steps):
+                state_d = state.to(device)
+                du_d = host_du.to(device)
+                state_d = torch.bmm(map_a, state_d.unsqueeze(-1)).squeeze(-1) + torch.bmm(
+                    map_b, du_d.unsqueeze(-1)
+                ).squeeze(-1)
+                _sync_device(device)
+                state = state_d.to("cpu")
+
+        def run_analytic_to_mps(
+            steps: int = jac_steps,
+            device: torch.device = device,
+            batch: int = batch,
+            state_np: np.ndarray = state_np,
+            control_np: np.ndarray = control_np,
+            dt: float = dt,
+        ) -> None:
+            for _ in range(steps):
+                for index in range(batch):
+                    state_jacobian, input_jacobian = rate_jacobians(state_np[index], control_np[index], dt)
+                    _ = torch.tensor(state_jacobian, dtype=torch.float32, device=device)
+                    _ = torch.tensor(input_jacobian, dtype=torch.float32, device=device)
+            _sync_device(device)
+
+        add("mps_copy_nonlinear", batch, steps, _time_call(run_copy_nonlinear, warmup=1, repeats=5), "mps_copy")
+        add("mps_copy_linear_map", batch, steps, _time_call(run_copy_linear, warmup=1, repeats=5), "mps_copy")
+        add(
+            "mps_jacobian_analytic",
+            batch,
+            jac_steps,
+            _time_call(run_analytic_to_mps, warmup=jac_warmup),
+            "mps_copy",
+        )
+        print(f"timed mps batch {batch}", flush=True)
+    return records
+
+
+def mps_numeric_checks(
+    rate_jacobians: Callable[[np.ndarray, np.ndarray, float], tuple[np.ndarray, np.ndarray]],
+) -> dict[str, float]:
+    """One-step agreement of the float32 map with the float64 plant, and with itself on MPS."""
+    rng = np.random.default_rng(0)
+    state_np, control_np = _batch_state(32, rng)
+    reference = step_nonlinear_np(state_np, control_np)
+    cpu = step_nonlinear_torch(
+        torch.tensor(state_np, dtype=torch.float32),
+        torch.tensor(control_np, dtype=torch.float32),
+    )
+    device = torch.device("mps")
+    got = step_nonlinear_torch(
+        torch.tensor(state_np, dtype=torch.float32, device=device),
+        torch.tensor(control_np, dtype=torch.float32, device=device),
+    )
+    _sync_device(device)
+    dt = float(X3["dt"])
+    state_jacobian, input_jacobian = rate_jacobians(state_np[0], control_np[0], dt)
+    discrete_a, discrete_b = jac_analytic_to_discrete(state_jacobian, input_jacobian, dt)
+    auto_a, auto_b = jac_autograd_torch(
+        torch.tensor(state_np[0], dtype=torch.float32, device=device),
+        torch.tensor(control_np[0], dtype=torch.float32, device=device),
+        dt=dt,
+    )
+    _sync_device(device)
+    analytic_gap = max(
+        float(np.max(np.abs(discrete_a.astype(np.float32) - auto_a.detach().cpu().numpy()))),
+        float(np.max(np.abs(discrete_b.astype(np.float32) - auto_b.detach().cpu().numpy()))),
+    )
+    return {
+        "cpu_f32_vs_f64_inf": float(np.max(np.abs(cpu.detach().numpy() - reference))),
+        "mps_vs_cpu_f32_inf": float(np.max(np.abs(got.detach().cpu().numpy() - cpu.detach().numpy()))),
+        "analytic_vs_autograd_f32_inf": analytic_gap,
+        "n_states": 32.0,
+    }
+
+
+def mps_crossover_notes(records: list[dict[str, object]]) -> dict[str, object]:
+    def series(name: str) -> dict[int, float]:
+        return {int(row["batch_size"]): float(row["us_per_step_item"]) for row in records if row["name"] == name}
+
+    def first_faster(left: dict[int, float], right: dict[int, float]) -> int | None:
+        for batch in sorted(left):
+            if left[batch] < right[batch]:
+                return batch
+        return None
+
+    cpu_nl = series("torch_cpu_f32_nonlinear")
+    shared_nl = series("mps_shared_nonlinear")
+    copy_nl = series("mps_copy_nonlinear")
+    cpu_lin = series("torch_cpu_f32_linear_map")
+    shared_lin = series("mps_shared_linear_map")
+    copy_lin = series("mps_copy_linear_map")
+    max_batch = max(cpu_nl)
+    return {
+        "dtype": "float32",
+        "mps_shared_nonlinear_faster_than_cpu_from_batch": first_faster(shared_nl, cpu_nl),
+        "mps_shared_faster_than_copy_nonlinear_from_batch": first_faster(shared_nl, copy_nl),
+        "mps_shared_linear_faster_than_cpu_from_batch": first_faster(shared_lin, cpu_lin),
+        "mps_shared_linear_faster_than_copy_from_batch": first_faster(shared_lin, copy_lin),
+        "ratios_at_max_batch": {
+            "batch": max_batch,
+            "torch_cpu_f32_nonlinear_us": cpu_nl[max_batch],
+            "mps_shared_nonlinear_us": shared_nl[max_batch],
+            "mps_copy_nonlinear_us": copy_nl[max_batch],
+            "torch_cpu_f32_linear_us": cpu_lin[max_batch],
+            "mps_shared_linear_us": shared_lin[max_batch],
+            "mps_copy_linear_us": copy_lin[max_batch],
+        },
+    }
+
+
+def plot_named(records: list[dict[str, object]], panels: tuple[tuple[tuple[str, ...], str], ...]) -> None:
+    for names, filename in panels:
+        fig, axis = plt.subplots(figsize=(COLUMN_IN, 3.15))
+        drawn = False
+        for name in names:
+            rows = [row for row in records if row["name"] == name]
+            if not rows:
+                continue
+            drawn = True
+            rows.sort(key=lambda row: int(row["batch_size"]))
+            axis.loglog(
+                [int(row["batch_size"]) for row in rows],
+                [float(row["us_per_step_item"]) for row in rows],
+                marker="o",
+                ms=4.5,
+                lw=1.5,
+                label=PRETTY[name],
+            )
+        if not drawn:
+            plt.close(fig)
+            continue
+        batches = [1, 8, 32, 128, 512, 2048]
+        axis.set_xscale("log")
+        axis.set_xticks(batches)
+        axis.set_xticklabels([str(batch) for batch in batches])
+        axis.minorticks_off()
+        axis.set_xlabel("Vehicles in the batch")
+        axis.set_ylabel("Time per vehicle\nper step (µs)")
+        _legend_below(fig, axis)
+        _save_column(fig, filename)
+
+
+def _load_results() -> dict[str, object] | None:
+    path = HERE / "results.json"
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text())
+
+
+def _write_payload(payload: dict[str, object]) -> None:
+    (HERE / "results.json").write_text(json.dumps(payload, indent=2) + "\n")
+    write_tables(
+        payload["errors"],  # type: ignore[arg-type]
+        payload["speed"],  # type: ignore[arg-type]
+        payload["checks"],  # type: ignore[arg-type]
+        payload.get("speed_mps"),  # type: ignore[arg-type]
+        payload.get("mps_checks"),  # type: ignore[arg-type]
+    )
+
+
+def _draw(payload: dict[str, object]) -> None:
+    style_plots()
+    speed = payload["speed"]
+    plot_speed(speed)  # type: ignore[arg-type]
+    mps_records = payload.get("speed_mps")
+    if not mps_records:
+        return
+    plot_named(
+        mps_records,  # type: ignore[arg-type]
+        (
+            (MPS_PROPAGATION_NAMES, "speed_mps_apply.png"),
+            (MPS_JACOBIAN_NAMES, "speed_mps_build.png"),
+        ),
+    )
+    combined = list(speed) + list(mps_records)  # type: ignore[arg-type]
+    plot_named(combined, ((COMPARE_NAMES, "speed_device_compare.png"),))
+
+
+def extend_with_mps(existing: dict[str, object]) -> None:
+    """Time the MPS grid and leave the stored CUDA records untouched."""
+    FIG.mkdir(exist_ok=True)
+    GENERATED.mkdir(exist_ok=True)
+    speed_before = json.dumps(existing["speed"])
+    print("building analytic Jacobians", flush=True)
+    rate_jacobians, _symbolic_f = build_jacobians()
+    print("timing mps", flush=True)
+    records = speed_records_mps(rate_jacobians)
+    checks = mps_numeric_checks(rate_jacobians)
+    print("mps checks", checks, flush=True)
+    existing["hardware_mps"] = mps_hardware_record()
+    existing["speed_mps"] = records
+    existing["crossover_mps"] = mps_crossover_notes(records)
+    existing["mps_checks"] = checks
+    if json.dumps(existing["speed"]) != speed_before:
+        raise RuntimeError("MPS run modified the stored CUDA speed records")
+    _write_payload(existing)
+    _draw(existing)
+    print("wrote MPS records into results.json; CUDA records unchanged", flush=True)
+
+
 def main() -> None:
+    existing = _load_results()
+    if existing is not None and not torch.cuda.is_available() and mps_available():
+        extend_with_mps(existing)
+        return
     FIG.mkdir(exist_ok=True)
     GENERATED.mkdir(exist_ok=True)
     style_plots()
@@ -965,7 +1469,6 @@ def main() -> None:
     plot_errors(errors)
     print("timing", flush=True)
     records = speed_records(rate_jacobians)
-    plot_speed(records)
     notes = crossover_notes(records)
     payload = {
         "hardware": hardware,
@@ -979,8 +1482,19 @@ def main() -> None:
         "speed": records,
         "crossover": notes,
     }
-    (HERE / "results.json").write_text(json.dumps(payload, indent=2) + "\n")
-    write_tables(errors, records, checks)
+    if existing is not None:
+        for key in ("hardware_mps", "speed_mps", "crossover_mps", "mps_checks"):
+            if key in existing and key not in payload:
+                payload[key] = existing[key]
+    if mps_available():
+        print("timing mps", flush=True)
+        mps_records = speed_records_mps(rate_jacobians)
+        payload["hardware_mps"] = mps_hardware_record()
+        payload["speed_mps"] = mps_records
+        payload["crossover_mps"] = mps_crossover_notes(mps_records)
+        payload["mps_checks"] = mps_numeric_checks(rate_jacobians)
+    _write_payload(payload)
+    _draw(payload)
     print("wrote results.json and figures", flush=True)
 
 

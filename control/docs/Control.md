@@ -54,7 +54,7 @@ Parameters: `control_law` (`prop` or `bang`), `k`, `min_speed`, `max_speed`, `ta
 | `make upgrade` | the same, with the newest allowed versions |
 | `make sync` | make the venv match `requirements/dev.txt` |
 
-rclpy and the message packages are apt packages in the image, not PyPI dependencies. Keep numpy on apt too: the ROS message extensions are compiled against it.
+rclpy and the message packages are apt packages in the image, not PyPI dependencies. Keep numpy on apt too: the ROS message extensions are compiled against it. PyTorch is not in the lock files. The dev container installs 2.15.0: the CUDA wheel when the container can see an NVIDIA GPU, and the CPU wheel with the MPS bridge on a Mac.
 
 ## Hardware, later
 

@@ -47,17 +47,36 @@ ENTRYPOINT ["/usr/local/bin/ros-entrypoint.sh"]
 CMD ["sleep", "infinity"]
 
 
-# dev: the single dev container. Sources are bind-mounted, not copied.
+# dev: the dev container. Sources are bind-mounted, not copied.
 FROM base AS dev
 
+# g++ and Python headers compile the MPS bridge into the venv on a Mac.
+# That bridge is a Linux extension; the CUDA image never loads it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++ \
         git \
         make \
+        python3-dev \
         shellcheck \
     && rm -rf /var/lib/apt/lists/*
 
 COPY control/requirements/dev.txt /tmp/requirements/dev.txt
-RUN pip install --requirement /tmp/requirements/dev.txt
+# TORCH_INDEX empty: pip installs torch from PyPI. On linux/amd64 that wheel
+# is the CUDA build the Windows container already used. The Apple MPS dev
+# container sets the CPU index, because the CUDA packages are not the GPU
+# on a Mac and do not install on linux/arm64. The version matches
+# .devcontainer/torch-pin.sh. post-create still switches a visible NVIDIA
+# GPU to the cu128 wheel.
+ARG TORCH_VERSION=2.15.0
+ARG TORCH_INDEX=
+RUN pip install --requirement /tmp/requirements/dev.txt \
+    && if [ -n "${TORCH_INDEX}" ]; then \
+         pip install --upgrade "torch==${TORCH_VERSION}" \
+           --index-url "${TORCH_INDEX}" \
+           --extra-index-url https://pypi.org/simple; \
+       else \
+         pip install --upgrade "torch==${TORCH_VERSION}"; \
+       fi
 
 
 # runtime: what compose.yaml deploys. One image, one command per service.

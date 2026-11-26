@@ -43,7 +43,7 @@
 | Climb with pitch | 10.0 ms | nonlinear | 0.00703 m | 0.0162 m | 0.0488° | 0.0843° |
 | Climb with pitch | 10.0 ms | linear, Jacobian held | 4.847e-06 m | 1.269e-05 m | 7.040e-07° | 0° |
 
-### Speed
+### Speed, Ryzen 7 8700F and RTX 4070 SUPER (float64)
 
 | Method | Batch | µs / (step·item) | (step·item) / s |
 |---|---:|---:|---:|
@@ -126,8 +126,76 @@
 | CUDA linear map, transfer | 2048 | 0.153 | 6.5204e+06 |
 | Analytic Jacobian + H2D | 2048 | 115 | 8722 |
 
+### Speed, Apple M5 Pro (float32)
+
+The host columns are Torch on this machine's CPU in float32, the dtype of the MPS columns.
+Shared keeps the working set in the MPS allocation and synchronizes once after the batch.
+Copy sends state to the device and brings it back on every step.
+
+| Method | Batch | µs / (step·item) | (step·item) / s |
+|---|---:|---:|---:|
+| Torch CPU float32 nonlinear | 1 | 98.3 | 1.0173e+04 |
+| Torch CPU float32 linear map | 1 | 3.91 | 2.5566e+05 |
+| Autograd Jacobian, CPU float32 | 1 | 4.67e+03 | 214 |
+| MPS shared nonlinear | 1 | 907 | 1102 |
+| MPS shared linear map | 1 | 33.6 | 2.9772e+04 |
+| Autograd Jacobian, MPS | 1 | 8.17e+03 | 122.4 |
+| MPS copy nonlinear | 1 | 1.67e+03 | 599.6 |
+| MPS copy linear map | 1 | 928 | 1078 |
+| Analytic Jacobian + MPS place | 1 | 333 | 3005 |
+| Torch CPU float32 nonlinear | 8 | 14.1 | 7.0727e+04 |
+| Torch CPU float32 linear map | 8 | 0.596 | 1.6779e+06 |
+| Autograd Jacobian, CPU float32 | 8 | 4.18e+03 | 239.4 |
+| MPS shared nonlinear | 8 | 100 | 9991 |
+| MPS shared linear map | 8 | 4.49 | 2.2260e+05 |
+| Autograd Jacobian, MPS | 8 | 8.09e+03 | 123.7 |
+| MPS copy nonlinear | 8 | 223 | 4482 |
+| MPS copy linear map | 8 | 118 | 8508 |
+| Analytic Jacobian + MPS place | 8 | 310 | 3231 |
+| Torch CPU float32 nonlinear | 32 | 3.75 | 2.6654e+05 |
+| Torch CPU float32 linear map | 32 | 0.773 | 1.2941e+06 |
+| Autograd Jacobian, CPU float32 | 32 | 4.19e+03 | 238.4 |
+| MPS shared nonlinear | 32 | 25 | 3.9948e+04 |
+| MPS shared linear map | 32 | 1.17 | 8.5149e+05 |
+| Autograd Jacobian, MPS | 32 | 8.21e+03 | 121.8 |
+| MPS copy nonlinear | 32 | 52.7 | 1.8963e+04 |
+| MPS copy linear map | 32 | 28 | 3.5687e+04 |
+| Analytic Jacobian + MPS place | 32 | 302 | 3309 |
+| Torch CPU float32 nonlinear | 128 | 1.14 | 8.7749e+05 |
+| Torch CPU float32 linear map | 128 | 0.341 | 2.9307e+06 |
+| Autograd Jacobian, CPU float32 | 128 | 4.13e+03 | 241.9 |
+| MPS shared nonlinear | 128 | 6.36 | 1.5713e+05 |
+| MPS shared linear map | 128 | 0.298 | 3.3577e+06 |
+| Autograd Jacobian, MPS | 128 | 8.19e+03 | 122.1 |
+| MPS copy nonlinear | 128 | 13.1 | 7.6583e+04 |
+| MPS copy linear map | 128 | 7.21 | 1.3869e+05 |
+| Analytic Jacobian + MPS place | 128 | 302 | 3317 |
+| Torch CPU float32 nonlinear | 512 | 0.991 | 1.0089e+06 |
+| Torch CPU float32 linear map | 512 | 1.69 | 5.9326e+05 |
+| Autograd Jacobian, CPU float32 | 512 | 4.47e+03 | 223.9 |
+| MPS shared nonlinear | 512 | 2.3 | 4.3552e+05 |
+| MPS shared linear map | 512 | 0.132 | 7.5663e+06 |
+| Autograd Jacobian, MPS | 512 | 8.49e+03 | 117.8 |
+| MPS copy nonlinear | 512 | 3.39 | 2.9481e+05 |
+| MPS copy linear map | 512 | 1.91 | 5.2295e+05 |
+| Analytic Jacobian + MPS place | 512 | 276 | 3626 |
+| Torch CPU float32 nonlinear | 2048 | 0.359 | 2.7867e+06 |
+| Torch CPU float32 linear map | 2048 | 0.433 | 2.3092e+06 |
+| Autograd Jacobian, CPU float32 | 2048 | 4.11e+03 | 243.6 |
+| MPS shared nonlinear | 2048 | 0.848 | 1.1791e+06 |
+| MPS shared linear map | 2048 | 0.0662 | 1.5116e+07 |
+| Autograd Jacobian, MPS | 2048 | 8.07e+03 | 123.9 |
+| MPS copy nonlinear | 2048 | 0.936 | 1.0684e+06 |
+| MPS copy linear map | 2048 | 0.538 | 1.8598e+06 |
+| Analytic Jacobian + MPS place | 2048 | 285 | 3506 |
+
 ### Jacobian agreement on the pitch-pulse reference
 
 - Analytic discrete Jacobian vs autograd, max abs: 4.066e-19
 - One-step linear remainder at δ ~ 1e-04: 5.265e-08
 
+### Float32 step on the Apple M5 Pro
+
+- Nonlinear step, Torch float32 CPU vs NumPy float64, max abs: 4.205e-08
+- Nonlinear step, MPS float32 vs Torch float32 CPU, max abs: 7.451e-09
+- Analytic discrete Jacobian (float64, cast to float32) vs autograd on MPS, max abs: 1.863e-09

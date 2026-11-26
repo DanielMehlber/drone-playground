@@ -37,4 +37,4 @@ Build the loops from the inside out. A route is a later publisher of setpoints. 
 
 ## Containers
 
-Open the repo root in the [[Dev containers|dev container]] and start each component in its own terminal. `compose.yaml` is for deployment: it starts the same components, one per container. [[Foxglove]] stays on Windows and is optional.
+Open the repo root and reopen in the [[Dev containers|dev container]]: CUDA on Windows, Apple MPS on a Mac. Start each component in its own terminal. `compose.yaml` is for deployment: it starts the same components, one per container. [[Foxglove]] stays on Windows and is optional.

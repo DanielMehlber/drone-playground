@@ -1,13 +1,13 @@
 ---
 title: "Comparing Error Propagation and Computational Load of Different Flight Dynamics Model Steps for Quadrotors"
-date: 2026-11-22
+date: 2026-11-24
 crossref:
   fig-title: "Fig."
   fig-prefix: "Fig."
   tbl-title: "Table"
   tbl-prefix: "Table"
 abstract: |
-  A 13-state discrete quadrotor map is timed on CPU as a nonlinear block step and as an affine deviation map, with analytic and automatic Jacobians kept as a separate cost. Open-loop trajectories are scored against a nonlinear step of 0.1 ms. On this machine the bare linear map is faster at every batch from 1 to 2048. Rebuilding the analytic Jacobian on every item is faster than the nonlinear step only at batch 1; from batch 8 the vectorized nonlinear step wins. Holding that Jacobian for 0.5–10 ms and integrating the affine model at 0.1 ms stays orders of magnitude closer to the fine trajectory than one Euler step of the same length. On an NVIDIA GeForce RTX 4070 SUPER the resident linear map is the fastest apply at batch 2048. The resident nonlinear step stays slower than the CPU Torch step at every batch from 1 to 2048. That gap follows the shape of the eager step: the host-device copy is a small part of the nonlinear cost, and the same card wins once the work is two resident matrix-vector products. A large-batch plant therefore stays on the CPU nonlinear step. An estimator or a controller that already holds $A$ and $B$ uses the resident linear map from batch 512.
+  A 13-state discrete quadrotor map is timed on CPU as a nonlinear block step and as an affine deviation map, with analytic and automatic Jacobians kept as a separate cost. Open-loop trajectories are scored against a nonlinear step of 0.1 ms. On this machine the bare linear map is faster at every batch from 1 to 2048. Rebuilding the analytic Jacobian on every item is faster than the nonlinear step only at batch 1; from batch 8 the vectorized nonlinear step wins. Holding that Jacobian for 0.5–10 ms and integrating the affine model at 0.1 ms stays orders of magnitude closer to the fine trajectory than one Euler step of the same length. On an NVIDIA GeForce RTX 4070 SUPER the resident linear map is the fastest apply at batch 2048. The resident nonlinear step stays slower than the CPU Torch step at every batch from 1 to 2048. That gap follows the shape of the eager step: the host-device copy is a small part of the nonlinear cost, and the same card wins once the work is two resident matrix-vector products. A large-batch plant therefore stays on the CPU nonlinear step. An estimator or a controller that already holds $A$ and $B$ uses the resident linear map from batch 512. The same operators on an Apple M5 Pro, in float32, keep state in the shared CPU–GPU allocation. The shared nonlinear step stays slower than Torch on that CPU at every batch from 1 to 2048. The shared linear map is faster than that CPU from batch 128, and a per-step copy of the state makes that map slower than the CPU again. A large plant stays on the CPU on both machines. A many-vehicle linear map stays in the allocation it already occupies.
 ---
 
 ## The question
@@ -59,7 +59,8 @@ Analytic $A$ and $B$ come from SymPy `lambdify` with common-subexpression elimin
 - Attitude uses explicit Euler with the rate at the start of the step, not $\omega^{+}$.
 - Rotor-drag yaw is omitted.
 - The linear model is first order about the state at the beginning of the hold. Its error has to grow with the hold and with the size of the maneuver.
-- A host-transfer GPU step, when a device is present, synchronizes every step. A resident step allocates state and input on the device and does not copy the state back until the batch ends.
+- A host-transfer GPU step, when a CUDA device is present, synchronizes every step. A resident step allocates state and input on the device and does not copy the state back until the batch ends.
+- MPS has no float64, so that grid times the same operators in float32. A shared step allocates state and input in the unified memory and synchronizes once after the batch. A copy step sends state and input across on every step, synchronizes, and brings the state back. Apply timings on that grid are the fastest of five repeats. Jacobian timings there are one repeat, as on CUDA.
 
 ### Reference and grids
 
@@ -71,7 +72,7 @@ Speed is reported as microseconds per (step · item) and as (step · item) per s
 
 ## Apparatus
 
-The process that produced the numbers below sees:
+The stored CUDA grid was produced by:
 
 - CPU: AMD Ryzen 7 8700F 8-Core Processor, 16 hardware threads, 15.4 GiB RAM
 - GPU: NVIDIA GeForce RTX 4070 SUPER, 12,282 MiB, driver 610.88, compute capability 8.9
@@ -79,7 +80,16 @@ The process that produced the numbers below sees:
 - `torch 2.15.0+cu132` (CUDA 13.2), NumPy 2.5.5
 - `torch.cuda.is_available()` is true and `nvidia-smi` reports the device above
 
-The CUDA wheel is the one that produced both the host Torch columns and the device columns. Resident timings allocate on the device and synchronize once after the batch. Transfer timings copy state and input to the device on every step, synchronize, and copy the state back.
+The CUDA wheel is the one that produced both the host Torch columns and the device columns. Resident timings allocate on the device and synchronize once after the batch. Transfer timings copy state and input to the device on every step, synchronize, and copy the state back. Those CUDA numbers are the stored grid. This process has no NVIDIA device, so that grid was not run again.
+
+The second machine, measured here, is:
+
+- SoC: Apple M5 Pro, 20 GPU cores, unified memory
+- The process is a Linux VM (18 threads, 7.75 GiB visible). Tensors on `"mps"` run on the Mac through the MPS bridge. The bridge reports a recommended allocation of 37.4 GiB, the Mac's pool
+- `torch 2.15.0+cpu`, NumPy 2.5.5, `torch.backends.mps.is_available()` true
+- dtype float32. On 32 states drawn as in the speed study, one Torch float32 step on the CPU differs from the NumPy float64 step by at most $4.2 \times 10^{-8}$. The same step on MPS differs from that CPU step by at most $7.5 \times 10^{-9}$. The analytic discrete Jacobian, cast to float32, differs from autograd on MPS by at most $1.9 \times 10^{-9}$
+
+The trajectory study stays the float64 plant. The MPS timings are the same operators in the dtype that device can run.
 
 The airframe constants are the X3 values used by the notebook: mass 1.5 kg, $g = 9.81$, $I_{xx} = 0.0347563$, $I_{yy} = 0.07$, $I_{zz} = 0.0977$, and the four rotor positions from the same model. Hover thrust per rotor is $mg/4 = 3.679\,\mathrm{N}$.
 
@@ -99,6 +109,8 @@ Differential thrust cancels in the total, so hover, pitch, and roll share one co
 ![Open-loop commands and the tilt they produce. Collective thrust is $f_1+f_2+f_3+f_4$ on the 0.1 ms grid. Pairwise difference is front pair minus rear pair, and left pair minus right pair on the roll reversal. Tilt is the angle between body $+z$ and world up, $\arccos(\hat{z}_b \cdot \hat{z}_w)$.](figures/scenarios_thrust_tilt.png){#fig-thrust width=100%}
 
 ## Speed
+
+@fig-speed-apply and @tbl-speed-ends are the Ryzen and the RTX 4070 SUPER, in float64. The Apple M5 Pro grid is @sec-mps.
 
 @fig-speed-apply is the cost of applying one step. The linear-map curves apply a frozen map and do not include building $A$ and $B$. The curve labeled "Jacobian + map" rebuilds the analytic Jacobian on every item and then applies the map. @fig-speed-build is the cost of forming $A$ and $B$ alone.
 
@@ -191,19 +203,55 @@ The ranking that should be carried forward is narrow. It says that this eager fl
 4. Differentiate with a batched Jacobian, a vectorized map over one reverse-mode product, before treating the 51 ms device column as the cost of a learned controller.
 5. Apply the affine map once at the coarse $\Delta t$, beside the 0.1 ms hold, so linearization error and integration error are no longer the same number.
 
+@sec-mps is a float32 run of this eager step, on an M5 Pro. It does not close item 1. That item is the same binary on this GeForce.
+
+## Apple MPS and shared memory {#sec-mps}
+
+The CUDA grid stays the measurement on the RTX 4070 SUPER. The grid in this section is the Apple M5 Pro in the apparatus, in float32. @fig-speed-mps-apply is the cost of applying one step on that machine. Shared means the state stays in the MPS allocation, which on this SoC is the machine's memory, with one synchronization after the batch. Copy means the CUDA transfer protocol on this device: every step sends the state to `"mps"`, runs the kernel, synchronizes, and brings the state back across the bridge into the VM. @fig-speed-mps-build is the cost of forming $A$ and $B$. @fig-speed-compare puts the two devices' apply columns on one axis. The CUDA series there are float64 on the 4070 SUPER. The MPS series are float32 on the M5 Pro. Same batch grid, same step code, different dtype and different machine.
+
+![Time per vehicle per step on the Apple M5 Pro, float32. Each apply point is the fastest of five repeats after warmup. Shared keeps state in the MPS allocation. Copy brings the state back on every step. The host curves are the same Torch step on this CPU.](figures/speed_mps_apply.png){#fig-speed-mps-apply width=100%}
+
+![Time per vehicle per step for building $A$ and $B$ on the M5 Pro, one timed repeat. Analytic + MPS place is the host `lambdify` plus the copy of $A$ and $B$ into the MPS allocation. Autograd differentiates one state at a time.](figures/speed_mps_build.png){#fig-speed-mps-build width=100%}
+
+![Apply cost on the two devices. CUDA curves are the stored float64 grid. MPS curves are the float32 shared placement. Resident and transfer on the GeForce sit close together on the nonlinear step and apart on the linear map. Shared and the M5 host are compared in @fig-speed-mps-apply.](figures/speed_device_compare.png){#fig-speed-compare width=100%}
+
+| Method | Batch 1 | Batch 2048 |
+|---|---:|---:|
+| Torch CPU float32 nonlinear | 98.3 µs | 0.359 µs |
+| MPS shared nonlinear | 907 µs | 0.848 µs |
+| MPS copy nonlinear | 1670 µs | 0.936 µs |
+| Torch CPU float32 linear map | 3.91 µs | 0.433 µs |
+| MPS shared linear map | 33.6 µs | 0.0662 µs |
+| MPS copy linear map | 928 µs | 0.538 µs |
+| Autograd Jacobian, CPU float32 | 4670 µs | 4110 µs |
+| Autograd Jacobian, MPS | 8170 µs | 8070 µs |
+| Analytic Jacobian + MPS place | 333 µs | 285 µs |
+
+: Per-item cost on the Apple M5 Pro, float32. Batches 8, 32, 128, and 512 are in `generated/tables.md`. Apply rows are the fastest of five repeats. Jacobian rows are one repeat. {#tbl-speed-mps}
+
+The shared nonlinear step does not beat Torch on this CPU at any batch. At batch 1 it takes 907 µs against 98.3 µs, 9.2 times the host step. At batch 512 the ratio is 2.3 (2.30 µs against 0.991 µs). At batch 2048 it is 2.4 (0.848 µs against 0.359 µs). The ratio stops falling. There is no crossover in this grid to extend, which is the same shape as the float64 result on the 4070 SUPER, on a chip whose float32 rate is the rate it is built for.
+
+Shared is faster than the per-step copy at every batch. For the nonlinear step the gap is small at the wide end, 0.848 µs against 0.936 µs at batch 2048, about a tenth. For the linear map the copy is the cost: 0.0662 µs shared against 0.538 µs copied at batch 2048, about eight times. The copy column is slower than this CPU's linear map at every batch, including 2048 (0.538 µs against 0.433 µs). The shared linear map passes that CPU map at batch 128 (0.298 µs against 0.341 µs) and is ahead at 512 (0.132 µs against 1.69 µs) and at 2048 (0.0662 µs against 0.433 µs). The host linear map on this CPU is not monotone: 0.341 µs at batch 128, 1.69 µs at batch 512, 0.433 µs at batch 2048. The shared map falls through those three points. A controller that reads the state back every step pays the copy column and loses the only win the GPU has.
+
+@fig-speed-compare is the two recorded grids, not a controlled swap of the card. At batch 2048 the resident CUDA nonlinear step is 0.765 µs in float64 and the shared MPS nonlinear step is 0.848 µs in float32. The resident CUDA linear map is 0.0279 µs and the shared MPS linear map is 0.0662 µs. Both nonlinear GPU steps sit behind their own host Torch step. Both linear maps win only while the matrices stay on the device. The 4070 SUPER wins that linear apply from batch 512. The M5 Pro wins it from batch 128, against its own CPU, and only in the shared column.
+
+Placing the analytic Jacobian into the MPS allocation stays near 300 µs per item from batch 1 (333 µs) to batch 2048 (285 µs). The curve is flat for the same reason as the CUDA host-to-device column: one Python call per item, and here an upload across the bridge on top of it. Autograd on MPS stays near 8.1 ms per item, about twice the 4.1 ms float32 autograd on this CPU, and about a sixth of the 51 ms float64 autograd on the 4070 SUPER. It does not improve with batch size. It remains a check, not a step in the loop.
+
 ## Discussion
 
 **Nonlinear block step.** It is the plant. It needs no Jacobian, it batches across items, and on this CPU the Torch version is the faster plant at batch 2048. The resident GPU step does not pass it. Its trajectory error is ordinary Euler truncation: fine at 0.5 ms (under a millimeter here) and into the centimeter range at 10 ms. Use it when the batch is large and the step has to be $f$ itself.
 
-**Bare linear map.** It is the cheapest propagation on every batch in this grid. The NumPy map is the cheapest through batch 128, and from batch 512 the resident CUDA map is the cheapest of all. The price is that someone else must have built $A$ and $B$. That is the right operator inside an estimator or a tracker that already has the local model and is pushing a deviation, not a replacement for $f$ at an arbitrary state unless the affine offset is kept and the refresh is fast enough.
+**Bare linear map.** It is the cheapest propagation on every batch in the float64 grid. The NumPy map is the cheapest through batch 128, and from batch 512 the resident CUDA map is the cheapest of all on that machine. On the M5 Pro the shared linear map is the cheapest apply from batch 128, against that machine's own float32 CPU. The price is that someone else must have built $A$ and $B$, and that those matrices stay in the allocation the map runs from. That is the right operator inside an estimator or a tracker that already has the local model and is pushing a deviation, not a replacement for $f$ at an arbitrary state unless the affine offset is kept and the refresh is fast enough.
 
 **Refreshed analytic Jacobian.** Building $A$ and $B$ from the symbolic formula costs about 35 µs per item and does not speed up as the batch grows. Adding the map does not hide that. The combination beats $f$ only at batch 1. From batch 8, if the goal is the next state of many vehicles, call the nonlinear step. If the goal is the deviation model, pay the 35 µs and keep the analytic formula; do not form it with autograd in the loop.
 
-**Autograd.** It agrees with the analytic discrete Jacobian to roundoff, which is what makes it a good check. At about 11 ms per item on the CPU, and about 51 ms on the GPU, it is two orders of magnitude off the pace of the analytic formula and three or more off the pace of $f$ at large batches.
+**Autograd.** It agrees with the analytic discrete Jacobian to roundoff in float64, and to $1.9 \times 10^{-9}$ in float32 on MPS, which is what makes it a good check. At about 11 ms per item on the Ryzen, about 4.1 ms in float32 on the M5 Pro's CPU, about 8.1 ms on MPS, and about 51 ms on the 4070 SUPER, it is far off the pace of the analytic formula and off the pace of $f$ at large batches.
 
 **Held linearization as an integrator.** On these four open-loop schedules, refreshing the analytic model every 0.5–10 ms and integrating it at 0.1 ms tracks the fine nonlinear trajectory much more closely than one Euler step of the refresh period. The hold error still grows with the interval and with the maneuver, as the first-order assumption says it must. It just grows from a much smaller base. A hover trim contributes nothing to either error.
 
-**GPU on this 4070 SUPER.** Keep the linear map resident if the batch is at least 512 and $A$ and $B$ already exist: that is the fastest apply in the grid. Keep the nonlinear step on the CPU through batch 2048. The reasons that loss is not a property of the card, and the runs that would move it, are in @sec-gpu-reading. Keep state on the device once the map is the linear one, and keep the analytic Jacobian on the host.
+**GPU on this 4070 SUPER.** Keep the linear map resident if the batch is at least 512 and $A$ and $B$ already exist: that is the fastest apply in the float64 grid. Keep the nonlinear step on the CPU through batch 2048. The reasons that loss is not a property of the card alone, and the runs that would move it, are in @sec-gpu-reading. Keep state on the device once the map is the linear one, and keep the analytic Jacobian on the host.
+
+**GPU on this M5 Pro.** Keep the linear map in the shared allocation from batch 128, and only then. Copying the state back each step makes that map slower than the float32 CPU map at every batch in the grid, including 0.538 µs against 0.433 µs at batch 2048. Keep the nonlinear step on the CPU through batch 2048: the shared step is 2.4 times the host step at that batch, and the ratio has stopped falling. Keep the analytic Jacobian on the host. Placing it into the MPS allocation adds a flat cost near 300 µs per item. The two machines agree on the shape of the result and disagree on the batch at which the linear map pays: 512 on the 4070 SUPER, 128 on the M5 Pro.
 
 ## Which step to run
 
@@ -214,28 +262,32 @@ Use the nonlinear step when the next state has to be the plant. Use the bare lin
 | Large-scale RL plant | Nonlinear step on CPU Torch, with $\Delta t$ of 0.5–2 ms when centimeter open-loop error matters. Do not rebuild the Jacobian inside the step. |
 | Differentiable RL | The same nonlinear step. The derivative has to be a batched backward. The measured autograd is one state at a time. |
 | EKF, one vehicle | Nonlinear step for the mean, $I + \Delta t\, A$ for the covariance, analytic $A$ when the estimate moves, on the CPU. |
-| EKF, many tracks | Bare linear map for the deviation and the covariance. Analytic $A$ once per track per update. Resident CUDA from 512 tracks, if $A$ and $B$ stay on the device. |
+| EKF, many tracks | Bare linear map for the deviation and the covariance. Analytic $A$ once per track per update. Resident CUDA from 512 tracks, or shared MPS from 128 tracks, if $A$ and $B$ stay in that allocation. |
 | UKF | Nonlinear step on the sigma points, on the CPU. One vehicle is about 27 evaluations of $f$. |
 | Classical control, one drone | Linear map for the design, nonlinear step for the plant, analytic $A$ at the trim or along the reference, on the CPU. |
 | Trajectory LQR | Refresh the analytic model every 5–10 ms. Integrate $f$, or the affine map, at 1 ms or finer, on the CPU. |
 | MPC, one vehicle | Linear map inside the horizon, nonlinear step between solves, analytic $A$ once per solve, on the CPU. |
-| MPC, many vehicles | Bare linear map, $A$ and $B$ frozen for the solve. Analytic $A$ once per vehicle per tick. Resident CUDA from 512 vehicles. |
+| MPC, many vehicles | Bare linear map, $A$ and $B$ frozen for the solve. Analytic $A$ once per vehicle per tick. Resident CUDA from 512 vehicles, or shared MPS from 128 vehicles. |
 
-: Step for each job. Times are @tbl-speed-ends. Trajectory error is @tbl-error. {#tbl-jobs}
+: Step for each job. Float64 times are @tbl-speed-ends. The M5 Pro times are @tbl-speed-mps. Trajectory error is @tbl-error. {#tbl-jobs}
 
-Three facts in the grid decide the device. The resident nonlinear step is slower than CPU Torch at every batch from 1 to 2048: 1.51 ms against 217 µs at one vehicle, and 0.765 µs against 0.388 µs at 2048. The gap narrows and has not crossed, so a large RL plant stays on the CPU through this batch. The resident linear map is the GPU series that wins, and only from batch 512, which is why a many-track EKF and a many-vehicle MPC move there and a single vehicle stays on the host. At batch 1 that map costs 64.8 µs against 3.76 µs in NumPy.
+Three facts in the float64 grid decide the 4070 SUPER. The resident nonlinear step is slower than CPU Torch at every batch from 1 to 2048: 1.51 ms against 217 µs at one vehicle, and 0.765 µs against 0.388 µs at 2048. The gap narrows and has not crossed, so a large RL plant stays on the CPU through this batch. The resident linear map is the GPU series that wins, and only from batch 512, which is why a many-track EKF and a many-vehicle MPC move there and a single vehicle stays on the host. At batch 1 that map costs 64.8 µs against 3.76 µs in NumPy.
 
-Building $A$ and $B$ does not get faster as the batch grows. The analytic formula is about 33 µs per item on the host and about 115 µs once those matrices are copied to the device. Per-item autograd is 11 ms on the CPU and 51 ms on the GPU, and the device copy of that check is the slowest Jacobian in the study. A differentiable plant needs a batched backward. The autograd column measured here is one state at a time.
+Three facts in the float32 grid decide the M5 Pro. The shared nonlinear step is slower than CPU Torch at every batch from 1 to 2048: 907 µs against 98.3 µs at one vehicle, and 0.848 µs against 0.359 µs at 2048. The ratio is 2.3 at batch 512 and 2.4 at batch 2048, so a large RL plant stays on the CPU on this chip as well. The shared linear map is the GPU series that wins, from batch 128, and the copy series does not win at all. A single vehicle stays on the host: at batch 1 the shared map costs 33.6 µs against 3.91 µs.
+
+Building $A$ and $B$ does not get faster as the batch grows. On the Ryzen the analytic formula is about 33 µs per item, and about 115 µs once those matrices are copied to the 4070 SUPER. On the M5 Pro, placing the same formula into the MPS allocation stays near 300 µs. Per-item autograd is 11 ms on the Ryzen, 51 ms on the 4070 SUPER, 4.1 ms in float32 on the M5 Pro's CPU, and 8.1 ms on MPS. The device column is the slow Jacobian on each machine. A differentiable plant needs a batched backward. The autograd column measured here is one state at a time.
 
 The hold in @tbl-error is the refresh period of a fine integrator. On the pitch pulse, one Euler step of 10 ms has 16.7 mm of position RMSE and 0.108° of attitude RMSE. Freezing $A$ and $B$ for those same 10 ms and integrating the affine map at 0.1 ms has 0.020 mm and an attitude RMSE below $10^{-6}$ degrees. Trajectory LQR and a single-vehicle MPC can refresh on that 5–10 ms clock. Twenty analytic Jacobians at about 35 µs are still under a millisecond, so one vehicle does not spend a device copy inside the solve.
 
-The grid is open loop, 2 s, four schedules, float64, with no rotor-drag yaw. The Jacobian is a Python loop, and the GPU step is the existing chain of PyTorch operations. Batch size stops at 2048. @sec-gpu-reading is what that implementation leaves undecided. The analytic discrete Jacobian matches autograd to $4.1 \times 10^{-19}$, so the formula itself is not the uncertainty.
+The error grid is open loop, 2 s, four schedules, float64, with no rotor-drag yaw. The speed grids use the same schedules' step, float64 on the 4070 SUPER and float32 on the M5 Pro. The Jacobian is a Python loop, and the GPU step is the existing chain of PyTorch operations. Batch size stops at 2048. @sec-gpu-reading is what the GeForce implementation leaves undecided. The analytic discrete Jacobian matches autograd to $4.1 \times 10^{-19}$ in float64, so the formula itself is not the uncertainty.
 
 ## Conclusion
 
-On the Ryzen 7 8700F and an RTX 4070 SUPER, with this 13-state map, the linear apply is faster than the nonlinear step at batch 1 and is still faster at batch 2048. @tbl-jobs assigns that comparison to a plant, an estimator, and a controller. The fastest apply at batch 2048 is the resident CUDA linear map. The resident nonlinear step never passes the CPU Torch step in this grid. The crossover that matters for a refreshed model is the other way: from batch 8, a vectorized nonlinear step is faster than rebuilding an analytic Jacobian per item. Autograd matches that Jacobian and is about 340 times slower on the CPU, and slower still on the device. Against a 0.1 ms nonlinear reference, a single Euler step of 10 ms costs about a centimeter and a tenth of a degree on the pitch and roll pulses; freezing the Jacobian for those same 10 ms and integrating the affine model at 0.1 ms stays under a few hundredths of a millimeter. The nonlinear GPU loss belongs to this eager float64 chain: the copy is a small share of it, the same card wins on the resident linear map, and @sec-gpu-reading lists the runs that would tell those two causes apart.
+On the Ryzen 7 8700F and an RTX 4070 SUPER, with this 13-state map, the linear apply is faster than the nonlinear step at batch 1 and is still faster at batch 2048. @tbl-jobs assigns that comparison to a plant, an estimator, and a controller. The fastest apply at batch 2048 is the resident CUDA linear map. The resident nonlinear step never passes the CPU Torch step in this grid. The crossover that matters for a refreshed model is the other way: from batch 8, a vectorized nonlinear step is faster than rebuilding an analytic Jacobian per item. Autograd matches that Jacobian and is about 340 times slower on the CPU, and slower still on the device. Against a 0.1 ms nonlinear reference, a single Euler step of 10 ms costs about a centimeter and a tenth of a degree on the pitch and roll pulses; freezing the Jacobian for those same 10 ms and integrating the affine model at 0.1 ms stays under a few hundredths of a millimeter. The nonlinear GPU loss on that card belongs to this eager float64 chain: the copy is a small share of it, the same card wins on the resident linear map, and @sec-gpu-reading lists the runs that would tell those two causes apart.
 
-The study is `study.py` in this directory. It writes `results.json`, `generated/tables.md`, and the figures. Quarto renders this article with the Typst engine.
+On the Apple M5 Pro the same eager step, in the float32 that MPS can run, repeats the split. The shared nonlinear step is still behind CPU Torch at batch 2048, by 2.4 times, and the per-step copy adds about a tenth. The shared linear map is the series that wins, from batch 128, and only while the state stays in that allocation: the copy of the same map is slower than the CPU at every measured batch. Across the two machines the recommendation is one rule with two thresholds. Keep $f$ on the CPU. Keep a linear map that already has $A$ and $B$ in the GPU allocation, resident CUDA from 512 vehicles and shared MPS from 128. Leave autograd, and a per-item upload of the analytic Jacobian, out of the loop on both.
+
+The study is `study.py` in this directory. A run keeps whichever device grid the machine cannot remeasure. It writes `results.json`, `generated/tables.md`, and the figures. Quarto renders this article with the Typst engine.
 
 ::: {.content-visible when-format="html"}
 ## Appendix
