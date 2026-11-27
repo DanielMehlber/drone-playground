@@ -12,7 +12,7 @@ abstract: |
 
 ## The question
 
-The discrete plant is a map $x^{+} = f(x, u)$ on position, body velocity, a quaternion, and body rate, with four rotor forces as the input. Two uses show up immediately in a batched simulator or an estimator: apply $f$, or apply a local linear model of $f$. This note asks which of those operators is faster at a given batch size, and how large a step can be before the open-loop trajectory leaves a fine nonlinear reference.
+The discrete plant is a map $x^{+} = f(x, u)$ on position, body velocity, a quaternion, and body rate. The input is four rotor speeds. Thrust and the shaft drag moment are computed inside the step. Two uses show up immediately in a batched simulator or an estimator: apply $f$, or apply a local linear model of $f$. This note asks which of those operators is faster at a given batch size, and how large a step can be before the open-loop trajectory leaves a fine nonlinear reference.
 
 The comparison is numerical. The block equations and the decision to keep $I^{-1}$ diagonal, to replace $R^{-1}$ by $R^{\mathsf{T}}$, and to drop symbolic normalization are the ones already fixed in the dynamics notebook. The $13 \times 13$ Jacobian is not expanded here.
 
@@ -24,7 +24,8 @@ One step of size $\Delta t$ is the explicit block map
 
 $$
 \begin{aligned}
-\tau &= \sum_{i=1}^{4} r_i \times F_i, \\
+T_i &= k_t \omega_i^2, \quad F_i = (0,\, 0,\, T_i), \quad M_i = k_m T_i, \\
+\tau &= \sum_{i=1}^{4} r_i \times F_i - \sum_{i=1}^{4} s_i M_i\, e_z, \\
 \omega^{+} &= \omega + \Delta t\, I^{-1}\big(\tau - \omega \times I\omega\big), \\
 q^{+} &= q + \tfrac12 \Delta t\, q \otimes \omega, \\
 v^{+} &= v + \Delta t\left(R(q)\, g_w + \tfrac1m \sum_{i=1}^{4} F_i\right), \\
@@ -32,7 +33,7 @@ p^{+} &= p + \Delta t\, R(q)^{\mathsf{T}} v^{+},
 \end{aligned}
 $$
 
-with $F_i = (0, 0, f_i)$ in the body frame and $g_w = (0, 0, -g)$. The same NumPy and PyTorch code paths implement this map. After each recorded step the quaternion is divided by its norm. That normalization is numerical; it is not part of the symbolic $f$.
+with $g_w = (0, 0, -g)$ and $e_z = (0, 0, 1)$. The command $\omega_i$ is a rotor speed in rad/s. $M_i$ is the shaft drag moment, not a quaternion component. The spin sign $s_i$ matches Gazebo: $+1$ counterclockwise about body $+z$, $-1$ clockwise, so a counterclockwise rotor yaws the body clockwise. The same NumPy and PyTorch code paths implement this map. After each recorded step the quaternion is divided by its norm. That normalization is numerical; it is not part of the symbolic $f$.
 
 ### Affine map about the current state
 
@@ -57,7 +58,8 @@ Analytic $A$ and $B$ come from SymPy `lambdify` with common-subexpression elimin
 - $I^{-1} = \mathrm{diag}(1/I_{xx}, 1/I_{yy}, 1/I_{zz})$ is an input. The step does not invert $I$.
 - The quaternion that enters $f$ has unit length, so $R^{-1} = R^{\mathsf{T}}$.
 - Attitude uses explicit Euler with the rate at the start of the step, not $\omega^{+}$.
-- Rotor-drag yaw is omitted.
+- Shaft drag yaw is included: $M_i = k_m T_i$ and $\tau_z$ carries $-s_i M_i$.
+- Cross-flow is omitted. Gazebo's `rotorDragCoefficient` and `rollingMomentCoefficient` are the in-plane force and the rolling moment from airspeed perpendicular to the shaft (*Querströmung*). Both are left out of this model.
 - The linear model is first order about the state at the beginning of the hold. Its error has to grow with the hold and with the size of the maneuver.
 - A host-transfer GPU step, when a CUDA device is present, synchronizes every step. A resident step allocates state and input on the device and does not copy the state back until the batch ends.
 - MPS has no float64, so that grid times the same operators in float32. A shared step allocates state and input in the unified memory and synchronizes once after the batch. A copy step sends state and input across on every step, synchronizes, and brings the state back. Apply timings on that grid are the fastest of five repeats. Jacobian timings there are one repeat, as on CUDA.
@@ -91,22 +93,22 @@ The second machine, measured here, is:
 
 The trajectory study stays the float64 plant. The MPS timings are the same operators in the dtype that device can run.
 
-The airframe constants are the X3 values used by the notebook: mass 1.5 kg, $g = 9.81$, $I_{xx} = 0.0347563$, $I_{yy} = 0.07$, $I_{zz} = 0.0977$, and the four rotor positions from the same model. Hover thrust per rotor is $mg/4 = 3.679\,\mathrm{N}$.
+The airframe constants are the X3 values used by the notebook: mass 1.5 kg, $g = 9.81$, $I_{xx} = 0.0347563$, $I_{yy} = 0.07$, $I_{zz} = 0.0977$, and the four rotor positions from the same model. $k_t = 8.54858 \times 10^{-6}\,\mathrm{N}/(\mathrm{rad/s})^2$ and $k_m = 0.016\,\mathrm{m}$. Spin signs are $+1, +1, -1, -1$. Hover speed per rotor is $\sqrt{mg/(4k_t)} \approx 656\,\mathrm{rad/s}$, which produces $mg/4 = 3.679\,\mathrm{N}$.
 
 ## Scenarios
 
 Each run is open loop for 2 s from rest at $(0, 0, 1)$ with identity attitude. The same schedule is used for every integrator.
 
-- **Hover.** Each rotor holds $mg/4$.
-- **Pitch pulse.** For 0.4 s the front pair is 0.35 N above hover and the rear pair is 0.35 N below, then the signs swap for 0.4 s, then hover. Nose-down, then nose-up. Peak tilt 23.8°. The vehicle ends at $(5.11, 0, -0.18)$ m because the residual tilt is held under hover thrust.
-- **Roll reversal.** The same shape with a 0.12 N left/right bias, sized to the smaller roll inertia. Peak tilt 26.6°. End position $(0, 5.65, -0.47)$ m.
-- **Climb with pitch.** Collective is $1.08\,mg$ for the whole horizon, plus a 0.02 N nose-down bias. Peak tilt 17.0°. End position $(1.19, 0, 2.41)$ m.
+- **Hover.** Each rotor holds $\sqrt{mg/(4k_t)}$, so each thrust is $mg/4$.
+- **Pitch pulse.** For 0.4 s the front pair is commanded to the speed whose thrust is 0.35 N above hover and the rear pair to 0.35 N below, then the signs swap for 0.4 s, then hover. Nose-down, then nose-up. Peak tilt 23.8°. The vehicle ends at $(5.11, 0, -0.18)$ m because the residual tilt is held under hover thrust.
+- **Roll reversal.** The same shape with a 0.12 N left/right thrust bias, sized to the smaller roll inertia. Peak tilt 26.6°. End position $(0, 5.65, -0.47)$ m.
+- **Climb with pitch.** Collective thrust is $1.08\,mg$ for the whole horizon, plus a 0.02 N nose-down thrust bias. Peak tilt 17.0°. End position $(1.19, 0, 2.41)$ m.
 
-Differential thrust cancels in the total, so hover, pitch, and roll share one collective line. The middle panel of @fig-thrust is the signed front-minus-rear command, except on the roll reversal, where it is left-minus-right. Tilt is the angle between body $+z$ and world $+z$.
+The schedule stores rotor speeds. A thrust offset $T$ is sent as $\sqrt{T/k_t}$. Each biased pair contains one counterclockwise rotor and one clockwise rotor, so the shaft moments cancel and the wrench is the thrust pattern above. Differential thrust cancels in the total, so hover, pitch, and roll share one collective line. The middle panel of @fig-thrust is the signed front-minus-rear thrust, except on the roll reversal, where it is left-minus-right. Tilt is the angle between body $+z$ and world $+z$.
 
 ![World position of the 0.1 ms nonlinear reference. Each point is $(p_x, p_y, p_z)$ after that step, with the quaternion renormalized. East, north, and up are the world axes. Hover remains at $(0, 0, 1)$ m.](figures/scenarios_3d.png){#fig-paths width=100%}
 
-![Open-loop commands and the tilt they produce. Collective thrust is $f_1+f_2+f_3+f_4$ on the 0.1 ms grid. Pairwise difference is front pair minus rear pair, and left pair minus right pair on the roll reversal. Tilt is the angle between body $+z$ and world up, $\arccos(\hat{z}_b \cdot \hat{z}_w)$.](figures/scenarios_thrust_tilt.png){#fig-thrust width=100%}
+![Open-loop commands and the tilt they produce. Collective thrust is $\sum_i k_t \omega_i^2$ on the 0.1 ms grid. Pairwise difference is the same sum on the front pair minus the rear pair, and left pair minus right pair on the roll reversal. Tilt is the angle between body $+z$ and world up, $\arccos(\hat{z}_b \cdot \hat{z}_w)$.](figures/scenarios_thrust_tilt.png){#fig-thrust width=100%}
 
 ## Speed
 

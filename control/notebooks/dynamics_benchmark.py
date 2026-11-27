@@ -14,7 +14,10 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-# Open Robotics X3-ish defaults (see sim/worlds/quadcopter.sdf).
+# Open Robotics X3 defaults (see sim/worlds/quadcopter.sdf).
+# k_t is motorConstant, N/(rad/s)^2. k_m is momentConstant, metres:
+# shaft drag moment M = k_m * thrust. s matches Gazebo turningDirection
+# (+1 CCW, -1 CW): rotors 0 and 1 CCW, rotors 2 and 3 CW.
 X3 = {
     "m": 1.5,
     "g": 9.81,
@@ -22,6 +25,9 @@ X3 = {
     "I_xx": 0.0347563,
     "I_yy": 0.07,
     "I_zz": 0.0977,
+    "k_t": 8.54858e-06,
+    "k_m": 0.016,
+    "s": np.array([1.0, 1.0, -1.0, -1.0], dtype=np.float64),
     "r": np.array(
         [
             [0.13, -0.22, 0.023],
@@ -32,6 +38,29 @@ X3 = {
         dtype=np.float64,
     ),
 }
+
+
+def hover_thrust() -> float:
+    """Thrust of one rotor at hover, mg/4, in newtons."""
+    return float(X3["m"] * X3["g"] / 4.0)
+
+
+def hover_speed() -> float:
+    """Rotor speed (rad/s) whose thrust k_t * omega^2 equals the hover weight share."""
+    return float(np.sqrt(hover_thrust() / X3["k_t"]))
+
+
+def speeds_for_thrust(thrust: np.ndarray) -> np.ndarray:
+    """Rotor speeds (rad/s) that produce the given thrusts through T = k_t * omega^2."""
+    thrust = np.asarray(thrust, dtype=np.float64)
+    return np.sqrt(np.maximum(thrust, 0.0) / float(X3["k_t"]))
+
+
+def speed_sigma_for_thrust(thrust_sigma: float, speed: float | None = None) -> float:
+    """Speed noise (rad/s) with the same dT as ``thrust_sigma`` newtons, at ``speed``."""
+    if speed is None:
+        speed = hover_speed()
+    return float(thrust_sigma) / (2.0 * float(X3["k_t"]) * speed)
 
 
 def _as_batch_state(x: np.ndarray) -> np.ndarray:
@@ -79,8 +108,16 @@ def step_nonlinear_np(
     dt: float = X3["dt"],
     I_diag: np.ndarray | None = None,
     r: np.ndarray | None = None,
+    k_t: float = X3["k_t"],
+    k_m: float = X3["k_m"],
+    spin: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Batched discrete map matching the notebook block equations (N,13)."""
+    """Batched discrete map matching the notebook block equations (N,13).
+
+    ``u`` is four rotor speeds in rad/s. Thrust is ``k_t * u^2`` along body +z.
+    The shaft drag moment ``M = k_m * thrust`` enters body yaw as ``-spin * M``,
+    with ``spin`` +1 CCW and -1 CW.
+    """
     x = _as_batch_state(x)
     n = x.shape[0]
     u = _as_batch_input(u, n)
@@ -88,6 +125,8 @@ def step_nonlinear_np(
         I_diag = np.array([X3["I_xx"], X3["I_yy"], X3["I_zz"]], dtype=np.float64)
     if r is None:
         r = X3["r"]
+    if spin is None:
+        spin = X3["s"]
     I_inv = 1.0 / I_diag
 
     p = x[:, 0:3]
@@ -95,9 +134,11 @@ def step_nonlinear_np(
     q = x[:, 6:10]
     w = x[:, 10:13]
 
+    thrust = k_t * u * u
     F = np.zeros((n, 4, 3), dtype=np.float64)
-    F[:, :, 2] = u
+    F[:, :, 2] = thrust
     tau = np.cross(r[None, :, :], F).sum(axis=1)
+    tau[:, 2] -= k_m * (thrust * spin).sum(axis=1)
 
     Iw = I_diag * w
     gyro = np.cross(w, Iw)
@@ -121,9 +162,9 @@ def step_nonlinear_np(
     g_world = np.array([0.0, 0.0, -g], dtype=np.float64)
     # Notebook convention: world_to_body = R @ world_vec
     g_body = np.einsum("nij,j->ni", R, g_world)
-    thrust = np.zeros((n, 3), dtype=np.float64)
-    thrust[:, 2] = u.sum(axis=1)
-    v_new = v + dt * (g_body + thrust / m)
+    force = np.zeros((n, 3), dtype=np.float64)
+    force[:, 2] = thrust.sum(axis=1)
+    v_new = v + dt * (g_body + force / m)
     v_world = np.einsum("nji,nj->ni", R, v_new)
     p_new = p + dt * v_world
 
@@ -158,7 +199,11 @@ def step_nonlinear_torch(
     dt: float = X3["dt"],
     I_diag: torch.Tensor | None = None,
     r: torch.Tensor | None = None,
+    k_t: float = X3["k_t"],
+    k_m: float = X3["k_m"],
+    spin: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Torch twin of ``step_nonlinear_np``. ``u`` is rotor speed in rad/s."""
     if x.ndim == 1:
         x = x.unsqueeze(0)
     if u.ndim == 1:
@@ -169,12 +214,17 @@ def step_nonlinear_torch(
         I_diag = torch.tensor([X3["I_xx"], X3["I_yy"], X3["I_zz"]], device=device, dtype=dtype)
     if r is None:
         r = torch.tensor(X3["r"], device=device, dtype=dtype)
+    if spin is None:
+        spin = X3["s"]
+    spin = torch.as_tensor(spin, device=device, dtype=dtype)
     I_inv = 1.0 / I_diag
 
     p, v, q, w = x[:, 0:3], x[:, 3:6], x[:, 6:10], x[:, 10:13]
+    thrust = k_t * u * u
     F = torch.zeros(n, 4, 3, device=device, dtype=dtype)
-    F[:, :, 2] = u
+    F[:, :, 2] = thrust
     tau = torch.cross(r.unsqueeze(0).expand(n, -1, -1), F, dim=2).sum(dim=1)
+    tau[:, 2] = tau[:, 2] - k_m * (thrust * spin).sum(dim=1)
 
     Iw = I_diag * w
     gyro = torch.cross(w, Iw, dim=1)
@@ -198,9 +248,9 @@ def step_nonlinear_torch(
     R = quat_to_R_torch(q)
     g_world = torch.tensor([0.0, 0.0, -g], device=device, dtype=dtype)
     g_body = torch.einsum("nij,j->ni", R, g_world)
-    thrust = torch.zeros(n, 3, device=device, dtype=dtype)
-    thrust[:, 2] = u.sum(dim=1)
-    v_new = v + dt * (g_body + thrust / m)
+    force = torch.zeros(n, 3, device=device, dtype=dtype)
+    force[:, 2] = thrust.sum(dim=1)
+    v_new = v + dt * (g_body + force / m)
     v_world = torch.einsum("nji,nj->ni", R, v_new)
     p_new = p + dt * v_world
     return torch.cat([p_new, v_new, q_new, w_new], dim=1)
@@ -250,10 +300,17 @@ def random_batch(
     n: int,
     *,
     rng: np.random.Generator,
-    hover_thrust: float | None = None,
+    hover: float | None = None,
+    speed_sigma: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    if hover_thrust is None:
-        hover_thrust = X3["m"] * X3["g"] / 4
+    """States near hover and rotor speeds near the hover speed.
+
+    The default speed noise has the same thrust derivative as 0.05 N.
+    """
+    if hover is None:
+        hover = hover_speed()
+    if speed_sigma is None:
+        speed_sigma = speed_sigma_for_thrust(0.05, hover)
     x = np.zeros((n, 13), dtype=np.float64)
     x[:, 6] = 1.0
     x[:, 0:3] = rng.normal(0.0, 0.05, size=(n, 3))
@@ -262,7 +319,7 @@ def random_batch(
     q = x[:, 6:10]
     x[:, 6:10] = q / np.linalg.norm(q, axis=1, keepdims=True)
     x[:, 10:13] = rng.normal(0.0, 0.2, size=(n, 3))
-    u = hover_thrust + rng.normal(0.0, 0.05, size=(n, 4))
+    u = hover + rng.normal(0.0, speed_sigma, size=(n, 4))
     return x, u
 
 

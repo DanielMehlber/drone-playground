@@ -59,9 +59,13 @@ from analytic import build_jacobians  # noqa: E402
 
 from dynamics_benchmark import (  # noqa: E402
     X3,
+    hover_speed,
+    hover_thrust,
     jac_analytic_to_discrete,
     jac_autograd_torch,
     quat_to_R_np,
+    speed_sigma_for_thrust,
+    speeds_for_thrust,
     step_nonlinear_np,
     step_nonlinear_torch,
 )
@@ -81,10 +85,6 @@ SCENARIO_LABELS = {
 }
 
 
-def hover_thrust() -> float:
-    return float(X3["m"] * X3["g"] / 4.0)
-
-
 def initial_state() -> np.ndarray:
     state = np.zeros(13, dtype=np.float64)
     state[2] = 1.0
@@ -100,43 +100,48 @@ def normalize_state(state: np.ndarray) -> np.ndarray:
 
 
 def schedule(kind: str, time_s: float) -> np.ndarray:
-    """Open-loop rotor forces (N). Zero-order hold on whatever grid calls this."""
+    """Open-loop rotor speeds (rad/s). The step computes thrust as k_t * omega^2.
+
+    The maneuver is specified as a thrust offset from hover, then converted
+    with omega = sqrt(T / k_t). Each biased pair has one CCW and one CW rotor,
+    so the shaft drag moments still cancel.
+    """
     base = hover_thrust()
-    control = np.full(4, base)
+    thrust = np.full(4, base)
     front = (0, 2)
     rear = (1, 3)
     left = (1, 2)
     right = (0, 3)
     if kind == "hover":
-        return control
+        return speeds_for_thrust(thrust)
     if kind == "pitch_pulse":
         if time_s < 0.4:
             bias = 0.35
         elif time_s < 0.8:
             bias = -0.35
         else:
-            return control
-        control[list(front)] += bias
-        control[list(rear)] -= bias
-        return np.maximum(control, 0.0)
+            return speeds_for_thrust(thrust)
+        thrust[list(front)] += bias
+        thrust[list(rear)] -= bias
+        return speeds_for_thrust(thrust)
     if kind == "roll_reversal":
         if time_s < 0.4:
             bias = 0.12
         elif time_s < 0.8:
             bias = -0.12
         else:
-            return control
-        control[list(left)] += bias
-        control[list(right)] -= bias
-        return np.maximum(control, 0.0)
+            return speeds_for_thrust(thrust)
+        thrust[list(left)] += bias
+        thrust[list(right)] -= bias
+        return speeds_for_thrust(thrust)
     if kind == "climb_pitch":
         # Collective above hover, plus a small sustained nose-down bias.
         # The bias is a few hundredths of a newton so the open-loop pitch
         # stays well short of a flip over the two-second horizon.
-        control[:] = base * 1.08
-        control[list(front)] += 0.02
-        control[list(rear)] -= 0.02
-        return control
+        thrust[:] = base * 1.08
+        thrust[list(front)] += 0.02
+        thrust[list(rear)] -= 0.02
+        return speeds_for_thrust(thrust)
     raise KeyError(kind)
 
 
@@ -350,7 +355,7 @@ def speed_records(
         )
 
     for batch in BATCH_SIZES:
-        hover = hover_thrust()
+        hover = hover_speed()
         state_np = np.zeros((batch, 13), dtype=np.float64)
         state_np[:, 6] = 1.0
         state_np[:, 0:3] = rng.normal(0.0, 0.05, size=(batch, 3))
@@ -359,7 +364,7 @@ def speed_records(
         quat = state_np[:, 6:10]
         state_np[:, 6:10] = quat / np.linalg.norm(quat, axis=1, keepdims=True)
         state_np[:, 10:13] = rng.normal(0.0, 0.05, size=(batch, 3))
-        control_np = hover + rng.normal(0.0, 0.02, size=(batch, 4))
+        control_np = hover + rng.normal(0.0, speed_sigma_for_thrust(0.02, hover), size=(batch, 4))
 
         steps = propagation_steps(batch)
         jac_steps, jac_warmup = jacobian_work(batch)
@@ -673,11 +678,12 @@ def plot_scenarios(references: dict[str, tuple[np.ndarray, np.ndarray]]) -> None
     fig, axes = plt.subplots(3, 1, figsize=(COLUMN_IN, 5.6), sharex=True)
     for kind, (times, states) in references.items():
         controls = controls_on_grid(kind, DT_REF)
-        thrust = controls.sum(axis=1)
+        thrust_each = float(X3["k_t"]) * np.square(controls)
+        thrust = thrust_each.sum(axis=1)
         if kind == "roll_reversal":
-            differential = controls[:, 1] + controls[:, 2] - controls[:, 0] - controls[:, 3]
+            differential = thrust_each[:, 1] + thrust_each[:, 2] - thrust_each[:, 0] - thrust_each[:, 3]
         else:
-            differential = controls[:, 0] + controls[:, 2] - controls[:, 1] - controls[:, 3]
+            differential = thrust_each[:, 0] + thrust_each[:, 2] - thrust_each[:, 1] - thrust_each[:, 3]
         stamp = DT_REF * np.arange(thrust.shape[0])
         stride = max(1, len(stamp) // 500)
         label = SCENARIO_LABELS[kind]
@@ -1033,7 +1039,7 @@ def mps_hardware_record() -> dict[str, object]:
 
 
 def _batch_state(batch: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
-    hover = hover_thrust()
+    hover = hover_speed()
     state_np = np.zeros((batch, 13), dtype=np.float64)
     state_np[:, 6] = 1.0
     state_np[:, 0:3] = rng.normal(0.0, 0.05, size=(batch, 3))
@@ -1042,7 +1048,7 @@ def _batch_state(batch: int, rng: np.random.Generator) -> tuple[np.ndarray, np.n
     quat = state_np[:, 6:10]
     state_np[:, 6:10] = quat / np.linalg.norm(quat, axis=1, keepdims=True)
     state_np[:, 10:13] = rng.normal(0.0, 0.05, size=(batch, 3))
-    control_np = hover + rng.normal(0.0, 0.02, size=(batch, 4))
+    control_np = hover + rng.normal(0.0, speed_sigma_for_thrust(0.02, hover), size=(batch, 4))
     return state_np, control_np
 
 
@@ -1427,7 +1433,7 @@ def main() -> None:
     hardware = hardware_record()
     print("building analytic Jacobians", flush=True)
     rate_jacobians, symbolic_f = build_jacobians()
-    hover_u = np.full(4, hover_thrust())
+    hover_u = np.full(4, hover_speed())
     hover_x = initial_state()
     symbolic = symbolic_f(hover_x, hover_u, DT_REF)
     block = step_one(hover_x, hover_u, DT_REF)

@@ -38,8 +38,13 @@ def build_jacobians() -> tuple[object, object]:
         rotor_symbols.extend(components)
         rotors.append(Matrix(components))
 
-    thrust_symbols = symbols("f1 f2 f3 f4", real=True)
-    forces = [Matrix([0, 0, thrust]) for thrust in thrust_symbols]
+    k_t, k_m = symbols("k_t k_m", real=True)
+    spin_symbols = symbols("s1 s2 s3 s4", real=True)
+    omega_symbols = symbols("omega1 omega2 omega3 omega4", real=True)
+    thrusts = [k_t * omega**2 for omega in omega_symbols]
+    forces = [Matrix([0, 0, thrust]) for thrust in thrusts]
+    # M = k_m * T. Body yaw is -s * M, with s = +1 CCW and -1 CW (Gazebo).
+    drag_moments = [k_m * thrust for thrust in thrusts]
 
     px, py, pz = symbols("x y z", real=True)
     vx, vy, vz = symbols("v_x v_y v_z", real=True)
@@ -53,6 +58,9 @@ def build_jacobians() -> tuple[object, object]:
 
     rotation = attitude.to_rotation_matrix()
     torque = sum((rotor.cross(force) for rotor, force in zip(rotors, forces, strict=True)), Matrix.zeros(3, 1))
+    body_z = Matrix([0, 0, 1])
+    for moment, spin in zip(drag_moments, spin_symbols, strict=True):
+        torque = torque - moment * spin * body_z
     momentum = inertia * rates
     gyroscopic = rates.cross(momentum)
     angular_acceleration = inertia_inv * (torque - gyroscopic)
@@ -68,7 +76,7 @@ def build_jacobians() -> tuple[object, object]:
 
     rate = (new_state - state) / step
     state_jacobian = rate.jacobian(state)
-    input_jacobian = rate.jacobian(Matrix(thrust_symbols))
+    input_jacobian = rate.jacobian(Matrix(omega_symbols))
 
     arguments = (
         px,
@@ -84,7 +92,7 @@ def build_jacobians() -> tuple[object, object]:
         wx,
         wy,
         wz,
-        *thrust_symbols,
+        *omega_symbols,
         mass,
         gravity,
         step,
@@ -92,6 +100,9 @@ def build_jacobians() -> tuple[object, object]:
         inertia_yy,
         inertia_zz,
         *rotor_symbols,
+        k_t,
+        k_m,
+        *spin_symbols,
     )
     constants = (
         float(X3["m"]),
@@ -100,6 +111,9 @@ def build_jacobians() -> tuple[object, object]:
         float(X3["I_yy"]),
         float(X3["I_zz"]),
         *X3["r"].reshape(-1).tolist(),
+        float(X3["k_t"]),
+        float(X3["k_m"]),
+        *X3["s"].tolist(),
     )
     jac_fn = lambdify(arguments, (state_jacobian, input_jacobian), modules="numpy", cse=True, docstring_limit=0)
     f_fn = lambdify(arguments, new_state, modules="numpy", cse=True, docstring_limit=0)
